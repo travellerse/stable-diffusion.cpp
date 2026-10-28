@@ -1037,6 +1037,11 @@ static std::string convert_diffusers_dit_to_original_pixart(std::string name) {
 
 static std::string convert_moss_image_dit_name(std::string name) {
     static const std::vector<std::pair<std::string, std::string>> name_map = {
+        // Must precede the weight rules: ".proj.q.weight" is a prefix of
+        // ".proj.q.weight_scale", and scales are per-source-tensor parts too.
+        {".proj.q.weight_scale", ".proj.qkv.weight_scale"},
+        {".proj.k.weight_scale", ".proj.qkv.weight_scale.1"},
+        {".proj.v.weight_scale", ".proj.qkv.weight_scale.2"},
         {".proj.q.weight", ".proj.qkv.weight"},
         {".proj.k.weight", ".proj.qkv.weight.1"},
         {".proj.v.weight", ".proj.qkv.weight.2"},

@@ -171,7 +171,16 @@ protected:
         const bool is_int8_tensorwise = weight_storage != tensor_storage_map.end() && weight_storage->second.is_int8_tensorwise;
         auto weight_scale_storage     = tensor_storage_map.find(prefix + "weight_scale");
         if (weight_scale_storage != tensor_storage_map.end()) {
-            const int64_t scale_nelements = weight_scale_storage->second.nelements();
+            // A fused weight may be assembled from split source tensors
+            // (e.g. split q/k/v), whose scales arrive as "weight_scale.N" parts.
+            int64_t scale_nelements = weight_scale_storage->second.nelements();
+            for (int i = 1;; ++i) {
+                auto part = tensor_storage_map.find(prefix + "weight_scale." + std::to_string(i));
+                if (part == tensor_storage_map.end()) {
+                    break;
+                }
+                scale_nelements += part->second.nelements();
+            }
             GGML_ASSERT(scale_nelements == 1 || scale_nelements == out_features);
             params["weight_scale"] = ggml_new_tensor_1d(ctx, GGML_TYPE_F32, scale_nelements);
             has_weight_scale       = true;
