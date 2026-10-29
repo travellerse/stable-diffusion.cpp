@@ -346,12 +346,23 @@ sd-cli -m model.safetensors -p "a cat" --flash-attn off
 | `te` | Text encoders and conditioners | `te`, `clip`, `text`, `textencoder`, `textencoders`, `conditioner`, `cond`, `llm`, `t5`, `t5xxl` |
 | `clip_vision` | CLIP vision encoder | `clip_vision`, `clipvision`, `clip-vision`, `vision` |
 | `vae` | VAE and TAE | `vae`, `firststage`, `autoencoder`, `tae` |
+| `preview_vae` | TAE used only for step previews | `preview_vae`, `preview-vae`, `tae-preview`, `vae-preview`, `preview` |
 | `controlnet` | ControlNet | `controlnet`, `control` |
 | `photomaker` | PhotoMaker ID encoder and PhotoMaker LoRA | `photomaker`, `photomakerid`, `pmid`, `photo` |
 | `upscaler` | ESRGAN upscaler | `upscaler`, `esrgan`, `hires` |
 | `detector` | ADetailer YOLOv8 detector | `detector`, `adetailer`, `yolo` |
 
 `te` is the preferred module name for text encoders. `clip` is kept as an accepted alias because many existing commands and model names use CLIP terminology.
+
+`preview_vae` only applies when a separate TAE is used for step previews
+(`--taesd` with `--taesd-preview-only`). Without an assignment it follows the
+`vae` module, so existing commands keep the preview on the VAE backend. Assign
+it to move only the preview, for example to keep the full VAE on the GPU while
+the preview decodes on the CPU:
+
+```shell
+sd-cli -m model.safetensors --taesd taef2.safetensors --taesd-preview-only --backend tae-preview=cpu
+```
 
 ## Backend names
 

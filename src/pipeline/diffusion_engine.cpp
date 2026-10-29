@@ -1126,10 +1126,10 @@ bool StableDiffusionGGML::build_vae_runners() {
 
     first_stage_model->set_max_graph_vram_bytes(max_graph_vram_bytes_for_module(SDBackendModule::VAE));
     if (preview_vae) {
-        preview_vae->set_max_graph_vram_bytes(max_graph_vram_bytes_for_module(SDBackendModule::VAE));
+        preview_vae->set_max_graph_vram_bytes(max_graph_vram_bytes_for_module(SDBackendModule::PREVIEW_VAE));
     }
     return register_runner_params(ModelComponent::VAE, first_stage_model, SDBackendModule::VAE) &&
-           register_runner_params(ModelComponent::PreviewVAE, preview_vae, SDBackendModule::VAE) &&
+           register_runner_params(ModelComponent::PreviewVAE, preview_vae, SDBackendModule::PREVIEW_VAE) &&
            register_runner_params(ModelComponent::AudioVAE, audio_vae_model, SDBackendModule::VAE);
 }
 
@@ -1264,7 +1264,7 @@ bool StableDiffusionGGML::validate_and_load_runners() {
             first_stage_model->set_flash_attention_enabled(enabled);
         }
         if (preview_vae) {
-            preview_vae->set_flash_attention_enabled(enabled);
+            preview_vae->set_flash_attention_enabled(flash_attention_for(SDBackendModule::PREVIEW_VAE));
         }
         if (audio_vae_model) {
             audio_vae_model->set_flash_attention_enabled(enabled);
@@ -1298,8 +1298,11 @@ bool StableDiffusionGGML::validate_and_load_runners() {
         }
     };
     set_conv_direct(SDBackendModule::DIFFUSION, {diffusion_model.get(), high_noise_diffusion_model.get()});
-    if (first_stage_model || preview_vae || audio_vae_model) {
-        set_conv_direct(SDBackendModule::VAE, {first_stage_model.get(), preview_vae.get(), audio_vae_model.get()});
+    if (first_stage_model || audio_vae_model) {
+        set_conv_direct(SDBackendModule::VAE, {first_stage_model.get(), audio_vae_model.get()});
+    }
+    if (preview_vae) {
+        set_conv_direct(SDBackendModule::PREVIEW_VAE, {preview_vae.get()});
     }
     if (control_net) {
         set_conv_direct(SDBackendModule::CONTROL_NET, {control_net.get()});

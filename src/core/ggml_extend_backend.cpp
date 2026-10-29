@@ -81,6 +81,10 @@ static bool parse_backend_module(const std::string& raw_name, SDBackendModule* m
         *module = SDBackendModule::VAE;
         return true;
     }
+    if (name == "vaepreview" || name == "taepreview" || name == "previewvae" || name == "preview") {
+        *module = SDBackendModule::PREVIEW_VAE;
+        return true;
+    }
     if (name == "controlnet" || name == "control") {
         *module = SDBackendModule::CONTROL_NET;
         return true;
@@ -108,6 +112,9 @@ static std::string module_assignment_name(const SDBackendAssignment& assignment,
     auto it = assignment.module_names.find(module);
     if (it != assignment.module_names.end()) {
         return it->second;
+    }
+    if (module == SDBackendModule::PREVIEW_VAE) {
+        return module_assignment_name(assignment, SDBackendModule::VAE);
     }
     return assignment.default_name;
 }
@@ -1188,6 +1195,8 @@ const char* sd_backend_module_name(SDBackendModule module) {
             return "clip_vision";
         case SDBackendModule::VAE:
             return "vae";
+        case SDBackendModule::PREVIEW_VAE:
+            return "preview_vae";
         case SDBackendModule::CONTROL_NET:
             return "controlnet";
         case SDBackendModule::PHOTOMAKER:

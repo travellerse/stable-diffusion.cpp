@@ -121,8 +121,10 @@ namespace sd::model_builders {
         }
 
         auto create_tae = [&](bool decode_only) -> std::shared_ptr<VAE> {
+            // Preview-only TAE runs on its own backend module; otherwise it is the VAE.
+            const SDBackendModule module = decode_only ? SDBackendModule::PREVIEW_VAE : SDBackendModule::VAE;
             if (find_model_traits(version)->video_tae) {
-                return std::make_shared<TinyVideoAutoEncoder>(ctx.backends.runtime_backend(SDBackendModule::VAE),
+                return std::make_shared<TinyVideoAutoEncoder>(ctx.backends.runtime_backend(module),
                                                               tensor_storage_map,
                                                               "decoder",
                                                               decode_only,
@@ -130,7 +132,7 @@ namespace sd::model_builders {
                                                               weight_manager);
 
             } else {
-                auto model = std::make_shared<TinyImageAutoEncoder>(ctx.backends.runtime_backend(SDBackendModule::VAE),
+                auto model = std::make_shared<TinyImageAutoEncoder>(ctx.backends.runtime_backend(module),
                                                                     tensor_storage_map,
                                                                     "decoder.layers",
                                                                     decode_only,
@@ -217,7 +219,10 @@ namespace sd::model_builders {
             LOG_INFO("using VAE for encoding / decoding");
             result.vae = create_vae();
             if (options.use_tae && options.tae_preview_only) {
-                LOG_INFO("using TAE for preview");
+                if (!ensure_backend_pair(ctx.backends, SDBackendModule::PREVIEW_VAE)) {
+                    return false;
+                }
+                LOG_INFO("using TAE for preview on %s", ggml_backend_name(ctx.backends.runtime_backend(SDBackendModule::PREVIEW_VAE)));
                 result.preview = create_tae(true);
             }
         }
