@@ -17,6 +17,7 @@ enum class SDBackendModule {
     TE,
     CLIP_VISION,
     VAE,
+    PREVIEW_VAE,
     CONTROL_NET,
     PHOTOMAKER,
     UPSCALER,
