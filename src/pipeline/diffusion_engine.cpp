@@ -913,6 +913,11 @@ bool StableDiffusionGGML::init(const sd_ctx_params_t* sd_ctx_params) {
         LOG_ERROR("invalid flash_attn_mode '%s': %s", flash_mode.c_str(), flash_error.c_str());
         return false;
     }
+    const std::string attn_qk_mode = SAFE_STR(sd_ctx_params->attn_qk_mode);
+    if (attn_qk_mode != "" && attn_qk_mode != "auto" && attn_qk_mode != "fp16" && attn_qk_mode != "int8") {
+        LOG_ERROR("invalid attn_qk_mode '%s' (expected auto, fp16 or int8)", attn_qk_mode.c_str());
+        return false;
+    }
     const std::string conv_mode = SAFE_STR(sd_ctx_params->conv_direct_mode);
     std::string conv_error;
     if (!sd_parse_conv_direct_assignment(conv_mode, &conv_direct_assignment, &conv_error)) {
@@ -987,6 +992,26 @@ bool StableDiffusionGGML::init(const sd_ctx_params_t* sd_ctx_params) {
 
     if (!init_backend()) {
         return false;
+    }
+    // Experimental INT8-QK attention switch. The Vulkan backend exposes a setter
+    // through the generic proc-address mechanism, so non-Vulkan builds ignore it.
+    if (attn_qk_mode == "int8" || attn_qk_mode == "fp16") {
+        const int mode = attn_qk_mode == "int8" ? 1 : 0;
+        bool applied = false;
+        for (size_t i = 0; i < ggml_backend_reg_count(); ++i) {
+            auto setter = (void (*)(int)) ggml_backend_reg_get_proc_address(
+                ggml_backend_reg_get(i), "ggml_backend_vk_set_fa_int8_qk");
+            if (setter != nullptr) {
+                setter(mode);
+                applied = true;
+                break;
+            }
+        }
+        if (applied) {
+            LOG_INFO("attn_qk_mode: %s", attn_qk_mode.c_str());
+        } else if (mode == 1) {
+            LOG_WARN("attn_qk_mode=int8 requested, but this build has no Vulkan backend; option ignored");
+        }
     }
     {
         std::string error;

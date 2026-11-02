@@ -774,6 +774,24 @@ ArgOptions SDContextParams::get_options() {
              return 1;
          }},
         {"",
+         "--attn-qk",
+         "auto|fp16|int8 (default: auto). Experimental INT8-QK flash attention for the diffusion model "
+         "(D=128 heads, batch 1). auto keeps the current FP16 path unless GGML_VK_FA_INT8QK is set. "
+         "Requires a Vulkan build; ignored otherwise",
+         [this](int argc, const char** argv, int index) {
+             if (++index >= argc) {
+                 LOG_ERROR("--attn-qk requires auto, fp16, or int8");
+                 return -1;
+             }
+             const std::string value = argv[index];
+             if (value != "auto" && value != "fp16" && value != "int8" && value != "off") {
+                 LOG_ERROR("--attn-qk must be auto, fp16, or int8 (got '%s')", value.c_str());
+                 return -1;
+             }
+             attn_qk_mode = value == "off" ? "fp16" : value;
+             return 1;
+         }},
+        {"",
          "--fa",
          "deprecated; use --flash-attn on",
          [this](int, const char**, int) {
@@ -1072,6 +1090,7 @@ sd_ctx_params_t SDContextParams::to_sd_ctx_params_t() {
     sd_ctx_params.lora_apply_mode                 = lora_apply_mode;
     sd_ctx_params.enable_mmap                     = enable_mmap;
     sd_ctx_params.flash_attn_mode                 = flash_attn_mode.c_str();
+    sd_ctx_params.attn_qk_mode                    = attn_qk_mode.c_str();
     sd_ctx_params.conv_direct_mode                = conv_direct_mode.c_str();
     sd_ctx_params.sage_attn                       = sage_attn;
     sd_ctx_params.linear_scale                    = linear_scale;
