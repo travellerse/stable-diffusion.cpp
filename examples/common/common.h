@@ -181,6 +181,7 @@ struct SDContextParams {
     bool clip_on_cpu     = false;
     bool vae_on_cpu      = false;
     std::optional<std::string> flash_attn_mode;
+    std::optional<std::string> attn_qk_mode;
     std::optional<std::string> conv_direct_mode;
     std::optional<bool> sage_attn;
     std::optional<bool> diffusion_conv_direct;

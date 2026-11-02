@@ -301,6 +301,7 @@ static void add_context_specs(std::vector<ParamSpec>& specs) {
     using namespace sd::api;
     ParamGroup ctx(specs, Context, [](sd::OptConfig& config) { return std::tie(config.context); });
 
+    ctx.string("attn_qk_mode", &sd::ContextConfig::attn_qk_mode);
     ctx.number("attn_scale", &sd::ContextConfig::attn_scale, 0, std::numeric_limits<float>::max());
     ctx.string("audio_encoder_path", &sd::ContextConfig::audio_encoder_path);
     ctx.string("audio_vae_path", &sd::ContextConfig::audio_vae_path);

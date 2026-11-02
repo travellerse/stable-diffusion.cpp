@@ -80,6 +80,7 @@ namespace sd {
         eager_load                = false;
         enable_mmap               = false;
         flash_attn_mode           = nullptr;
+        attn_qk_mode              = nullptr;
         conv_direct_mode          = nullptr;
         diffusion_flash_attn      = false;
         sage_attn                 = false;

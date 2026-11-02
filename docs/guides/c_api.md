@@ -318,6 +318,7 @@ with at least two entries. SLG layer indices are nonnegative integers.
 | `adetail.args` | `string` | adetail |
 | `adetail.negative_prompt` | `string` | adetail |
 | `adetail.prompt` | `string` | adetail |
+| `attn_qk_mode` | `string` | context |
 | `attn_scale` | `float` | context |
 | `audio_encoder_path` | `string` | context |
 | `audio_vae_path` | `string` | context |
