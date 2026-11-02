@@ -645,7 +645,7 @@ namespace sd_vulkan_i8 {
                 status                          = dispatch(pipeline, 4 * d.cm_n, tile_rows, {d.info.subgroup_size, d.cm_m, d.cm_n, d.cm_k}, 0, coop_rows);
             }
             if (status == GGML_STATUS_SUCCESS)
-                status = dispatch(SD_VK_PIPELINE(mul_mat_i8_tensorwise, 6, MatParameters), 16, 16, {}, coop_rows, rows - coop_rows);
+                status = dispatch(SD_VK_PIPELINE(mul_mat_i8_tensorwise, 6, MatParameters), 32, 64, {}, coop_rows, rows - coop_rows);
         }
         if (status == GGML_STATUS_SUCCESS && concat && ggml_nbytes(concat->src[0])) {
             ggml_ext_vulkan_binding src = {concat->src[0]}, prefix = range(dst, 0, ggml_nbytes(concat->src[0]));

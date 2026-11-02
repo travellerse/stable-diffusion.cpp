@@ -5,70 +5,111 @@
 
 layout(local_size_x = 16, local_size_y = 16, local_size_z = 1) in;
 
-layout(push_constant) uniform parameter {
+layout(push_constant) uniform parameter
+{
     uint n;
     uint rows;
     uint k;
     uint has_bias;
     uint row_offset;
-}
-p;
+} p;
 
-layout(binding = 0, std430) readonly buffer W {
-    int data_w[];
-};
-layout(binding = 1, std430) readonly buffer A {
-    int data_a[];
-};
-layout(binding = 2, std430) readonly buffer WS {
-    float data_ws[];
-};
-layout(binding = 3, std430) readonly buffer AS {
-    float data_as[];
-};
-layout(binding = 4, std430) readonly buffer B {
-    float data_b[];
-};
-layout(binding = 5, std430) writeonly buffer D {
-    float data_d[];
-};
+layout(binding = 0, std430) readonly buffer W { int data_w[]; };
+layout(binding = 1, std430) readonly buffer A { int data_a[]; };
+layout(binding = 2, std430) readonly buffer WS { float data_ws[]; };
+layout(binding = 3, std430) readonly buffer AS { float data_as[]; };
+layout(binding = 4, std430) readonly buffer B { float data_b[]; };
+layout(binding = 5, std430) writeonly buffer D { float data_d[]; };
 
-shared int weights[16 * 8];
-shared int activations[16 * 8];
+// Output tile: 64 rows x 32 columns per workgroup, 4 rows x 2 columns per
+// thread (8 independent dot-product accumulators).
+//
+// A thread owns the columns {lx, lx+16} and the rows {4*ly .. 4*ly+3}, so the
+// four activation words of one K step are contiguous and 16-byte aligned in
+// shared memory: one LDS.128 fetch replaces four scalar loads. With two weight
+// loads this gives 8 dp4a per 11 instructions instead of 8 per 14. Weight
+// fetches stay bank-conflict free (16 lanes read 16 consecutive words).
+// Shared tiles are double buffered so the next K slice is fetched while the
+// current one is consumed, with a single barrier per stage.
+const uint KC     = 8;   // packed ints staged per iteration (32 int8 values)
+const uint TILE_N = 32;
+const uint TILE_R = 64;
+const uint RPM    = 4;   // rows per thread
+const uint CPT    = TILE_N / 16;  // columns per thread
+
+shared int w_sh[2][KC][TILE_N];       // [buf][k][col]
+shared ivec4 a_sh[2][KC][TILE_R / 4]; // [buf][k][row / 4]
 
 void main() {
-    const uint output_index = gl_WorkGroupID.x * 16 + gl_LocalInvocationID.x;
-    const uint row          = p.row_offset + gl_WorkGroupID.y * 16 + gl_LocalInvocationID.y;
-    const uint lx           = gl_LocalInvocationID.x;
-    const uint ly           = gl_LocalInvocationID.y;
-    const uint k_packed     = p.k / 4;
-    int sum                 = 0;
+    const uint lx  = gl_LocalInvocationID.x;
+    const uint ly  = gl_LocalInvocationID.y;
+    const uint lid = ly * 16 + lx;
 
-    for (uint k_base = 0; k_base < k_packed; k_base += 8) {
-        if (ly < 8) {
-            weights[lx * 8 + ly] = output_index < p.n
-                                       ? data_w[output_index * k_packed + k_base + ly]
-                                       : 0;
-        }
-        if (lx < 8) {
-            activations[ly * 8 + lx] = row < p.rows
-                                           ? data_a[row * k_packed + k_base + lx]
-                                           : 0;
-        }
-        barrier();
+    const uint col_base = gl_WorkGroupID.x * TILE_N;
+    const uint row_base = p.row_offset + gl_WorkGroupID.y * TILE_R;
+    const uint k_packed = p.k / 4;
 
-        [[unroll]]
-        for (uint i = 0; i < 8; ++i) {
-            sum += dotPacked4x8EXT(weights[lx * 8 + i], activations[ly * 8 + i]);
+    const uint row0 = row_base + RPM * ly;
+
+    int sum[RPM * CPT];
+    [[unroll]] for (uint c = 0; c < RPM * CPT; ++c) {
+        sum[c] = 0;
+    }
+
+    // stage one K slice (KC packed ints) into buffer "b"
+    #define STAGE(b, kb)                                                                        \
+        [[unroll]] for (uint t = 0; t < (TILE_N * KC) / 256; ++t) {                             \
+            const uint idx = lid + t * 256;                                                     \
+            const uint col = idx / KC;                                                           \
+            const uint kk  = idx % KC;                                                           \
+            const uint gc  = col_base + col;                                                     \
+            w_sh[b][kk][col] = gc < p.n ? data_w[gc * k_packed + (kb) + kk] : 0;                 \
+        }                                                                                        \
+        [[unroll]] for (uint t = 0; t < (TILE_R * KC) / 256; ++t) {                              \
+            const uint idx = lid + t * 256;                                                      \
+            const uint row = idx / KC;                                                           \
+            const uint kk  = idx % KC;                                                           \
+            const uint gr  = row_base + row;                                                     \
+            a_sh[b][kk][row >> 2][row & 3] = gr < p.rows ? data_a[gr * k_packed + (kb) + kk] : 0; \
+        }
+
+    STAGE(0, 0)
+    barrier();
+
+    for (uint k_base = 0; k_base < k_packed; k_base += KC) {
+        const uint buf       = (k_base / KC) & 1u;
+        const uint next_base = k_base + KC;
+        if (next_base < k_packed) {
+            STAGE(buf ^ 1u, next_base)
+        }
+
+        [[unroll]] for (uint kk = 0; kk < KC; ++kk) {
+            const ivec4 a = a_sh[buf][kk][ly];
+            [[unroll]] for (uint c = 0; c < CPT; ++c) {
+                const int w = w_sh[buf][kk][16 * c + lx];
+                [[unroll]] for (uint r = 0; r < RPM; ++r) {
+                    sum[CPT * r + c] += dotPacked4x8EXT(w, a[r]);
+                }
+            }
         }
         barrier();
     }
+    #undef STAGE
 
-    if (output_index < p.n && row < p.rows) {
-        float value = float(sum) * data_as[row] * data_ws[output_index];
-        if (p.has_bias != 0) {
-            value += data_b[output_index];
+    [[unroll]] for (uint c = 0; c < CPT; ++c) {
+        const uint col = col_base + 16 * c + lx;
+        if (col < p.n) {
+            const float wsc = data_ws[col];
+            [[unroll]] for (uint r = 0; r < RPM; ++r) {
+                const uint row = row0 + r;
+                if (row < p.rows) {
+                    float v = float(sum[CPT * r + c]) * data_as[row] * wsc;
+                    if (p.has_bias != 0) {
+                        v += data_b[col];
+                    }
+                    data_d[row * p.n + col] = v;
+                }
+            }
         }
-        data_d[row * p.n + output_index] = value;
     }
 }
