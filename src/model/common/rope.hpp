@@ -4,12 +4,24 @@
 #include <algorithm>
 #include <cassert>
 #include <cmath>
+#include <cstdio>
+#include <cstring>
 #include <set>
 #include <utility>
 #include <vector>
 #include "core/ggml_extend.h"
 #include "core/ggml_runner.h"
 #include "core/util.h"
+
+// Current DiT block index, set by the model around its attention call so the
+// diagnostic export in Rope::attention knows which layer it is looking at.
+inline int & sd_attn_debug_layer_ref() {
+    static thread_local int layer = -1;
+    return layer;
+}
+inline int sd_attn_debug_layer() {
+    return sd_attn_debug_layer_ref();
+}
 
 namespace Rope {
     enum class EmbedNDLayout {
@@ -1142,6 +1154,41 @@ namespace Rope {
         k = apply_rope(ctx, k, pe, rope_interleaved);  // [N*n_head, L, d_head]
 
         auto x = ggml_ext_attention_ext(ctx, q, k, v, n_head, mask, true, ctx->flash_attn_enabled, kv_scale);  // [N, L, n_head*d_head]
+
+        // Diagnostic export of the exact tensors Flash Attention consumes. The
+        // tensors are promoted to graph outputs so their buffers survive until
+        // the dump runs; nothing changes when the env var is unset.
+        if (const char * dump_layers = getenv("SD_DUMP_ATTN_LAYERS")) {
+            const int layer = sd_attn_debug_layer();
+            if (layer >= 0) {
+                char list[256];
+                snprintf(list, sizeof(list), ",%s,", dump_layers);
+                char want[32];
+                snprintf(want, sizeof(want), ",%d,", layer);
+                if (strstr(list, want) != nullptr && ctx->graph != nullptr) {
+                    char name[64];
+                    snprintf(name, sizeof(name), "dbg_q_l%d", layer);
+                    ggml_set_name(q, name);
+                    ggml_set_output(q);
+                    ggml_build_forward_expand(ctx->graph, q);
+                    snprintf(name, sizeof(name), "dbg_k_l%d", layer);
+                    ggml_set_name(k, name);
+                    ggml_set_output(k);
+                    ggml_build_forward_expand(ctx->graph, k);
+                    snprintf(name, sizeof(name), "dbg_v_l%d", layer);
+                    // v is a strided view of the fused qkv projection; dump a
+                    // contiguous copy so the export has a well-defined layout.
+                    auto v_dbg = ggml_cont(ctx->ggml_ctx, v);
+                    ggml_set_name(v_dbg, name);
+                    ggml_set_output(v_dbg);
+                    ggml_build_forward_expand(ctx->graph, v_dbg);
+                    snprintf(name, sizeof(name), "dbg_a_l%d", layer);
+                    ggml_set_name(x, name);
+                    ggml_set_output(x);
+                    ggml_build_forward_expand(ctx->graph, x);
+                }
+            }
+        }
         return x;
     }
 };  // namespace Rope

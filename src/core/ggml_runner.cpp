@@ -856,6 +856,41 @@ bool GGMLRunner::execute_segment(ggml_cgraph* graph, int n_threads, const std::f
     return true;
 }
 
+// Diagnostic: dump graph nodes whose name starts with "dbg_" when SD_DUMP_STEPS
+// is set. Used to locate nondeterministic stages; no effect on default runs.
+static void sd_debug_dump_graph_nodes(ggml_cgraph * graph) {
+    static const char * dump_dir = getenv("SD_DUMP_STEPS");
+    if (dump_dir == nullptr || graph == nullptr) {
+        return;
+    }
+    static int call_index = 0;
+    ++call_index;
+    for (int i = 0; i < ggml_graph_n_nodes(graph); ++i) {
+        ggml_tensor * t = ggml_graph_node(graph, i);
+        if (t == nullptr || strncmp(t->name, "dbg_", 4) != 0) {
+            continue;
+        }
+        std::vector<char> buf(ggml_nbytes(t));
+        ggml_backend_tensor_get(t, buf.data(), 0, buf.size());
+        char path[1024];
+        snprintf(path, sizeof(path), "%s/%s_c%04d.bin", dump_dir, t->name, call_index);
+        FILE * f = fopen(path, "wb");
+        if (f != nullptr) {
+            fwrite(buf.data(), 1, buf.size(), f);
+            fclose(f);
+        }
+        char mpath[1024];
+        snprintf(mpath, sizeof(mpath), "%s/manifest_gpu.jsonl", dump_dir);
+        FILE * mf = fopen(mpath, "a");
+        if (mf != nullptr) {
+            fprintf(mf, "{\"tag\":\"%s\",\"call\":%d,\"type\":\"%s\",\"n\":%lld,\"shape\":[%lld,%lld,%lld,%lld]}\n",
+                    t->name, call_index, ggml_type_name(t->type), (long long) ggml_nelements(t),
+                    (long long) t->ne[0], (long long) t->ne[1], (long long) t->ne[2], (long long) t->ne[3]);
+            fclose(mf);
+        }
+    }
+}
+
 std::optional<Tensor<float>> GGMLRunner::execute_graph(ggml_cgraph* graph, int n_threads, bool no_return, const std::function<bool()>& read_outputs) {
     if (!assign_graph_cut_layer_split_backends(graph)) {
         return std::nullopt;
@@ -1032,6 +1067,7 @@ std::optional<Tensor<float>> GGMLRunner::execute_graph(ggml_cgraph* graph, int n
         if (!execute_segment(segment_graph, n_threads, [&]() { weights.submit_next(); })) {
             return fail_segment("execution");
         }
+        sd_debug_dump_graph_nodes(segment_graph);
         auto cache_status = cache_.capture(segment_graph);
         if (cache_status == GGML_STATUS_SUCCESS) {
             cache_status = cut_cache_.capture(graph, segment, get_desc().c_str());

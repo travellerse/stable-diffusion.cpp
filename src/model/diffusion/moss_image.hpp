@@ -97,9 +97,10 @@ namespace MOSSImage {
 
     struct Block : public GGMLBlock {
         MOSSImageConfig config;
+        int64_t index = -1;
 
-        Block(const MOSSImageConfig& config)
-            : config(config) {
+        Block(const MOSSImageConfig& config, int64_t index = -1)
+            : config(config), index(index) {
             blocks["norm1"]            = std::make_shared<RMSNorm>(config.dim, 1e-6f);
             blocks["norm2"]            = std::make_shared<RMSNorm>(config.dim, 1e-6f);
             blocks["q_norm"]           = std::make_shared<RMSNorm>(config.head_dim, 1e-6f);
@@ -115,8 +116,34 @@ namespace MOSSImage {
             auto linear = [&](const char* name, ggml_tensor* h) { return std::dynamic_pointer_cast<Linear>(blocks[name])->forward(ctx, h); };
             auto norm   = [&](const char* name, ggml_tensor* h) { return std::dynamic_pointer_cast<RMSNorm>(blocks[name])->forward(ctx, h); };
             auto part   = [&](int i) { return mod[i]; };
+            if (const char * dump_layers = getenv("SD_DUMP_X_LAYERS")) {
+                char want[32];
+                snprintf(want, sizeof(want), ",%" PRId64 ",", index);
+                char list[256];
+                snprintf(list, sizeof(list), ",%s,", dump_layers);
+                if (strstr(list, want) != nullptr && ctx->graph != nullptr) {
+                    char dbg_name[64];
+                    snprintf(dbg_name, sizeof(dbg_name), "dbg_x_l%" PRId64, index);
+                    ggml_set_name(x, dbg_name);
+                    ggml_set_output(x);
+                    ggml_build_forward_expand(ctx->graph, x);
+                }
+            }
             auto y      = norm("norm1", x);
             y           = ggml_ext_modulate(ctx, y, part(0), part(1));
+            if (const char * dump_layers = getenv("SD_DUMP_NRM")) {
+                char want[32];
+                snprintf(want, sizeof(want), ",%" PRId64 ",", index);
+                char list[256];
+                snprintf(list, sizeof(list), ",%s,", dump_layers);
+                if (strstr(list, want) != nullptr && ctx->graph != nullptr) {
+                    char dbg_name[64];
+                    snprintf(dbg_name, sizeof(dbg_name), "dbg_nrm_l%" PRId64, index);
+                    ggml_set_name(y, dbg_name);
+                    ggml_set_output(y);
+                    ggml_build_forward_expand(ctx->graph, y);
+                }
+            }
             auto qkv    = linear("proj.qkv", y);
             auto split  = [&](int i) {
                 return ggml_view_4d(c, qkv, config.head_dim, config.dim / config.head_dim, x->ne[1], x->ne[2],
@@ -125,7 +152,10 @@ namespace MOSSImage {
             auto q       = norm("q_norm", split(0));
             auto k       = norm("k_norm", split(1));
             auto v       = split(2);
+            const int prev_debug_layer = sd_attn_debug_layer();
+            sd_attn_debug_layer_ref()  = static_cast<int>(index);
             y            = Rope::attention(ctx, q, k, v, pe, nullptr, 1.f, false);
+            sd_attn_debug_layer_ref()  = prev_debug_layer;
             y            = linear("proj.o", y);
             y            = ggml_mul(c, y, part(2));
             x            = ggml_add(c, x, y);
@@ -154,7 +184,7 @@ namespace MOSSImage {
             blocks["shared_block_modulation"] = std::make_shared<Linear>(config.dim, 6 * config.dim, true);
             blocks["video_head_modulation"]   = std::make_shared<Linear>(config.dim, 2 * config.dim, true);
             for (int64_t i = 0; i < config.depth; ++i) {
-                blocks["layers." + std::to_string(i)] = std::make_shared<Block>(config);
+                blocks["layers." + std::to_string(i)] = std::make_shared<Block>(config, i);
             }
             blocks["final_norm_video"]   = std::make_shared<RMSNorm>(config.dim, 1e-6f);
             blocks["final_linear_video"] = std::make_shared<Linear>(config.dim, config.channels, false);

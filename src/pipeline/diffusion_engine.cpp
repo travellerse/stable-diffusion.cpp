@@ -2298,6 +2298,49 @@ void StableDiffusionGGML::compute_sample_controls(const sd::Tensor<float>& contr
     *controls = std::move(*control_result);
 }
 
+// Diagnostic latent dump: enabled only when SD_DUMP_STEPS points at a directory.
+// Writes raw f32 planes plus a jsonl manifest with shape/hash/stats so repeated
+// runs can be compared step by step. Default builds are unaffected.
+static void sd_debug_dump_latent(const char * tag, int step, float sigma, const sd::Tensor<float> & t) {
+    static const char * dump_dir = getenv("SD_DUMP_STEPS");
+    if (dump_dir == nullptr || t.empty()) {
+        return;
+    }
+    const auto & v = t.values();
+    char path[1024];
+    snprintf(path, sizeof(path), "%s/%s_s%03d.bin", dump_dir, tag, step);
+    FILE * f = fopen(path, "wb");
+    if (f == nullptr) {
+        return;
+    }
+    fwrite(v.data(), sizeof(float), v.size(), f);
+    fclose(f);
+
+    uint64_t h = 1469598103934665603ull;
+    double sum = 0.0, sum2 = 0.0, maxabs = 0.0;
+    for (float value : v) {
+        uint32_t bits = 0;
+        memcpy(&bits, &value, sizeof(bits));
+        h = (h ^ bits) * 1099511628211ull;
+        const double d = value;
+        sum += d;
+        sum2 += d * d;
+        maxabs = std::max(maxabs, std::fabs(d));
+    }
+    char mpath[1024];
+    snprintf(mpath, sizeof(mpath), "%s/manifest.jsonl", dump_dir);
+    FILE * mf = fopen(mpath, "a");
+    if (mf != nullptr) {
+        fprintf(mf, "{\"tag\":\"%s\",\"step\":%d,\"sigma\":%.9g,\"n\":%zu,\"shape\":[", tag, step, sigma, v.size());
+        for (int i = 0; i < t.dim(); ++i) {
+            fprintf(mf, "%s%" PRId64, i ? "," : "", t.shape()[i]);
+        }
+        fprintf(mf, "],\"fnv\":\"%016" PRIx64 "\",\"mean\":%.9g,\"rms\":%.9g,\"maxabs\":%.9g}\n",
+                h, sum / (double) v.size(), std::sqrt(sum2 / (double) v.size()), maxabs);
+        fclose(mf);
+    }
+}
+
 sd::Tensor<float> StableDiffusionGGML::sample(const std::shared_ptr<DiffusionModelRunner>& work_diffusion_model,
                                               bool inverse_noise_scaling,
                                               const sd::Tensor<float>& init_latent,
@@ -2439,6 +2482,7 @@ sd::Tensor<float> StableDiffusionGGML::sample(const std::shared_ptr<DiffusionMod
             LOG_VERBOSE("cancelling generation");
             return {};
         }
+        sd_debug_dump_latent("lin", step, sigma, x);
 
         if (step == 1 || step == -1) {
             pretty_progress(0, (int)steps, 0);
@@ -2543,6 +2587,15 @@ sd::Tensor<float> StableDiffusionGGML::sample(const std::shared_ptr<DiffusionMod
             diffusion_params.c_concat    = c_concat_override != nullptr ? c_concat_override : (condition.c_concat.empty() ? nullptr : &condition.c_concat);
             diffusion_params.y           = condition.c_vector.empty() ? nullptr : &condition.c_vector;
             diffusion_params.ref_latents = ref_latents_override != nullptr ? ref_latents_override : (condition.c_ref_images.empty() ? &ref_latents : &condition.c_ref_images);
+            {
+                const bool is_uncond = &condition == &uncond;
+                if (diffusion_params.x != nullptr) {
+                    sd_debug_dump_latent(is_uncond ? "dx_uncond" : "dx", step, sigma, *diffusion_params.x);
+                }
+                if (diffusion_params.context != nullptr) {
+                    sd_debug_dump_latent(is_uncond ? "dctx_uncond" : "dctx", step, sigma, *diffusion_params.context);
+                }
+            }
 
             if (sd_version_is_unet(version)) {
                 int nvf = -1;
@@ -2660,6 +2713,7 @@ sd::Tensor<float> StableDiffusionGGML::sample(const std::shared_ptr<DiffusionMod
             }
 
             step_cache.after_condition(&condition, noised_input, output_opt);
+            sd_debug_dump_latent("pred", step, sigma, output_opt);
             return output_opt;
         };
 
