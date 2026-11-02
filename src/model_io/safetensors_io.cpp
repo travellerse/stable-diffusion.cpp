@@ -247,6 +247,43 @@ bool read_safetensors_file(const std::string& file_path,
         comfy_quant_configs.emplace(module_name, std::move(config));
     }
 
+    // ComfyUI's legacy checkpoints keep the per-module quantization configs in
+    // the safetensors header; ComfyUI converts them to ".comfy_quant" tensors
+    // at load time. Accept the same header so those files load without a
+    // rewrite.
+    if (metadata != nullptr) {
+        auto legacy_metadata = metadata->find("_quantization_metadata");
+        if (legacy_metadata != metadata->end()) {
+            try {
+                const nlohmann::json legacy_json = nlohmann::json::parse(legacy_metadata->second);
+                auto layers                      = legacy_json.is_object() ? legacy_json.find("layers") : legacy_json.end();
+                if (layers != legacy_json.end() && layers->is_object()) {
+                    for (const auto& item : layers->items()) {
+                        if (!item.value().is_object()) {
+                            continue;
+                        }
+                        ComfyQuantConfig config;
+                        config.format     = item.value().value("format", "");
+                        config.convrot    = item.value().value("convrot", false);
+                        config.group_size = item.value().value("convrot_groupsize", 0);
+#ifdef SD_USE_UPSTREAM_GGML
+                        if (config.format == "int8_tensorwise") {
+                            set_error(error,
+                                      "INT8 tensorwise/convrot is not supported by this ggml build (layer '" +
+                                          item.key() + "')");
+                            return false;
+                        }
+#endif
+                        comfy_quant_configs.emplace(item.key(), std::move(config));
+                    }
+                }
+            } catch (const std::exception&) {
+                set_error(error, "parsing legacy quantization metadata failed in '" + file_path + "'");
+                return false;
+            }
+        }
+    }
+
     tensor_storages.clear();
     for (auto& item : header_.items()) {
         std::string name           = item.key();
