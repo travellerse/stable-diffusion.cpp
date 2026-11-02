@@ -955,6 +955,28 @@ public:
         x = ggml_mul_inplace(ctx->ggml_ctx, x, w);
         return x;
     }
+
+    // rms_norm(x) * weight * (1 + scale) + shift, with per-column scale/shift.
+    // Expressed as add(mul(rms_norm, weight*(1+scale)), shift) so the whole
+    // chain maps onto one fused kernel instead of four element-wise passes.
+    ggml_tensor* forward_affine(GGMLRunnerContext* ctx, ggml_tensor* x, ggml_tensor* scale, ggml_tensor* shift) {
+        GGML_ASSERT(elementwise_affine);
+        auto c         = ctx->ggml_ctx;
+        ggml_tensor* w = params["weight"];
+        if (ctx->weight_adapter) {
+            w = ctx->weight_adapter->patch_weight(ctx->ggml_ctx, ctx->backend, w, prefix + "weight");
+        }
+        w = ggml_add(c, w, ggml_mul(c, w, scale));
+        // Emit the modulation early: the Vulkan backend only fuses
+        // rms_norm->mul->add when the three nodes are adjacent in the graph,
+        // and a lazily visited weight would land between them.
+        if (ctx->graph != nullptr) {
+            ggml_build_forward_expand(ctx->graph, w);
+        }
+        x = ggml_rms_norm(c, x, eps);
+        x = ggml_mul(c, x, w);
+        return ggml_add(c, x, shift);
+    }
 };
 
 class MultiheadAttention : public GGMLBlock {

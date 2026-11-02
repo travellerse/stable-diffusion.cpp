@@ -115,6 +115,9 @@ namespace MOSSImage {
             auto c      = ctx->ggml_ctx;
             auto linear = [&](const char* name, ggml_tensor* h) { return std::dynamic_pointer_cast<Linear>(blocks[name])->forward(ctx, h); };
             auto norm   = [&](const char* name, ggml_tensor* h) { return std::dynamic_pointer_cast<RMSNorm>(blocks[name])->forward(ctx, h); };
+            auto norm_affine = [&](const char* name, ggml_tensor* h, ggml_tensor* scale, ggml_tensor* shift) {
+                return std::dynamic_pointer_cast<RMSNorm>(blocks[name])->forward_affine(ctx, h, scale, shift);
+            };
             auto part   = [&](int i) { return mod[i]; };
             if (const char * dump_layers = getenv("SD_DUMP_X_LAYERS")) {
                 char want[32];
@@ -129,8 +132,7 @@ namespace MOSSImage {
                     ggml_build_forward_expand(ctx->graph, x);
                 }
             }
-            auto y      = norm("norm1", x);
-            y           = ggml_ext_modulate(ctx, y, part(0), part(1));
+            auto y      = norm_affine("norm1", x, part(1), part(0));
             if (const char * dump_layers = getenv("SD_DUMP_NRM")) {
                 char want[32];
                 snprintf(want, sizeof(want), ",%" PRId64 ",", index);
@@ -159,8 +161,7 @@ namespace MOSSImage {
             y            = linear("proj.o", y);
             y            = ggml_mul(c, y, part(2));
             x            = ggml_add(c, x, y);
-            y            = norm("norm2", x);
-            y            = ggml_ext_modulate(ctx, y, part(3), part(4));
+            y            = norm_affine("norm2", x, part(4), part(3));
             auto up_gate = linear("proj.ffn_up_gate", y);
             y            = ggml_ext_situ(ctx, up_gate);
             y            = linear("proj.ffn_down", y);
@@ -218,10 +219,12 @@ namespace MOSSImage {
                 }
             }
             x          = ggml_ext_slice(c, x, 1, 0, image_len);
-            x          = std::dynamic_pointer_cast<RMSNorm>(blocks["final_norm_video"])->forward(ctx, x);
             auto shift = ggml_ext_slice(c, head, 0, 0, config.dim);
             auto scale = ggml_ext_slice(c, head, 0, config.dim, 2 * config.dim);
-            x          = ggml_ext_modulate(ctx, x, shift, scale);
+            if (ctx->graph != nullptr) {
+                ggml_build_forward_expand(ctx->graph, shift);
+            }
+            x          = std::dynamic_pointer_cast<RMSNorm>(blocks["final_norm_video"])->forward_affine(ctx, x, scale, shift);
             x          = linear("final_linear_video", x);
             return DiT::unpatchify(c, x, image->ne[1], image->ne[0], 1, 1);
         }
