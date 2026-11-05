@@ -1,0 +1,111 @@
+#version 450
+
+// QK-pass microkernel extracted from flash_attn.comp (Br=8, Bc=64, D_split=8,
+// 128 threads, wave32). Only the score matmul is computed; softmax and PV are
+// dropped so the two instruction variants can be compared in isolation.
+//
+//   INT8 undefined : Q/K are f16, four v_dot2_f32_f16 per (row, col, d-step)
+//   INT8 defined   : Q/K are int8 (4 packed per word), one dp4a per (row, col)
+//
+// Workgroup 0 writes its 8 x KV scores so the numerics can be checked against a
+// reference; every workgroup performs the full compute.
+
+#extension GL_EXT_control_flow_attributes : enable
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+#extension GL_EXT_integer_dot_product : require
+#extension GL_KHR_shader_subgroup_shuffle : enable
+
+#extension GL_EXT_spirv_intrinsics : require
+spirv_instruction(extensions = ["SPV_VALVE_mixed_float_dot_product"],
+                  capabilities = [6912], id = 6916)
+float v_dot2_f32_f16(f16vec2 a, f16vec2 b, float acc);
+
+layout(local_size_x = 128) in;
+
+const uint Br      = 8;
+const uint Bc      = 64;
+const uint HSK     = 128;
+const uint D_split = 8;
+const uint rows_per_thread = 8;
+const uint cols_per_iter   = 128 / D_split;      // 16
+const uint cols_per_thread = Bc / cols_per_iter; // 4
+
+#ifdef INT8
+const uint words_per_row = HSK / 4;  // 32 words, 4 int8 each
+#else
+const uint words_per_row = HSK / 2;  // 64 words, 2 halves each
+#endif
+
+layout(push_constant) uniform P {
+    uint N;    // query rows
+    uint KV;   // key rows
+    float scale;
+} p;
+
+layout(binding = 0, std430) readonly buffer QBuf { uint data_q[]; };
+layout(binding = 1, std430) readonly buffer KBuf { uint data_k[]; };
+layout(binding = 2, std430) writeonly buffer SBuf { float data_s[]; };
+layout(binding = 3, std430) readonly buffer QScale { float data_qs[]; };
+layout(binding = 4, std430) readonly buffer KScale { float data_ks[]; };
+
+shared uint qsh[Br * words_per_row];
+
+void main() {
+    const uint tid     = gl_LocalInvocationIndex;
+    const uint lane    = tid % D_split;
+    const uint col_tid = tid / D_split;
+    const uint wg      = gl_WorkGroupID.x;
+    const uint row0    = wg * Br;
+
+    [[unroll]] for (uint idx = tid; idx < Br * words_per_row; idx += 128) {
+        const uint r = idx / words_per_row;
+        const uint w = idx % words_per_row;
+        qsh[idx] = (row0 + r < p.N) ? data_q[(row0 + r) * words_per_row + w] : 0u;
+    }
+    barrier();
+
+    for (uint j = 0; j * Bc < p.KV; ++j) {
+        [[unroll]] for (uint c = 0; c < cols_per_thread; ++c) {
+            const uint col = j * Bc + c * cols_per_iter + col_tid;
+            if (col >= p.KV) {
+                continue;
+            }
+            const uint kbase = col * words_per_row;
+            const float s_k  = data_ks[col];
+
+            [[unroll]] for (uint r = 0; r < rows_per_thread; ++r) {
+                float acc;
+#ifdef INT8
+                int iacc = 0;
+                [[unroll]] for (uint ds = 0; ds < 4; ++ds) {
+                    const uint qw = qsh[r * words_per_row + ds * D_split + lane];
+                    const uint kw = data_k[kbase + ds * D_split + lane];
+                    iacc = dotPacked4x8EXT(int(qw), int(kw)) + iacc;
+                }
+                acc = float(iacc) * data_qs[row0 + r] * s_k;
+#else
+                float facc = 0.0;
+                [[unroll]] for (uint ds = 0; ds < 4; ++ds) {
+                    const uint w  = (ds * D_split + lane) * 2;
+                    const uint qw0 = qsh[r * words_per_row + w];
+                    const uint qw1 = qsh[r * words_per_row + w + 1];
+                    const uint kw0 = data_k[kbase + w];
+                    const uint kw1 = data_k[kbase + w + 1];
+                    const f16vec4 qv = f16vec4(unpackFloat2x16(qw0), unpackFloat2x16(qw1));
+                    const f16vec4 kv = f16vec4(unpackFloat2x16(kw0), unpackFloat2x16(kw1));
+                    facc = v_dot2_f32_f16(qv.zw, kv.zw, v_dot2_f32_f16(qv.xy, kv.xy, facc));
+                }
+                acc = facc;
+#endif
+                float v = acc * p.scale;
+                // combine the D_split lanes (same as the QK reduction in flash_attn.comp)
+                [[unroll]] for (uint s = D_split / 2; s > 0; s >>= 1) {
+                    v += subgroupShuffleXor(v, s);
+                }
+                if (wg == 0u) {
+                    data_s[r * p.KV + col] = v;
+                }
+            }
+        }
+    }
+}

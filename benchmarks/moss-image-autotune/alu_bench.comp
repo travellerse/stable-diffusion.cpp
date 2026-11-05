@@ -1,0 +1,82 @@
+#version 450
+
+// Pure register ALU throughput probe for the two inner-loop primitives of the
+// Flash Attention QK pass on RDNA2:
+//   fp16: v_dot2_f32_f16 (2 MACs per instruction), as used by flash_attn.comp
+//   int8: v_dot4_i32_i8  (4 MACs per instruction), DP4A
+// Eight independent accumulator chains keep the pipelines busy; the loop body
+// depends on the accumulators so nothing can be hoisted out.
+
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+#extension GL_EXT_shader_explicit_arithmetic_types_int8 : require
+#extension GL_EXT_integer_dot_product : require
+
+#ifndef INT8
+#extension GL_EXT_spirv_intrinsics : require
+spirv_instruction(extensions = ["SPV_VALVE_mixed_float_dot_product"],
+                  capabilities = [6912], id = 6916)
+float v_dot2_f32_f16(f16vec2 a, f16vec2 b, float acc);
+#endif
+
+layout(local_size_x = 64) in;
+
+layout(push_constant) uniform P {
+    uint iters;
+} p;
+
+layout(binding = 0) readonly buffer A { uint data_a[]; };
+layout(binding = 1) writeonly buffer D { uint data_d[]; };
+
+void main() {
+    const uint t = gl_GlobalInvocationID.x;
+    // derive operands from the thread id so the compiler cannot constant-fold
+    uint s = data_a[t & 1023u] ^ (t * 2654435761u);
+    uint s2 = data_a[(t + 7u) & 1023u] ^ (t * 40503u);
+
+    // fp16 packed operands (4 halves per vec4)
+    f16vec4 a0 = f16vec4(unpackHalf2x16(s), unpackHalf2x16(s2));
+    f16vec4 b0 = f16vec4(unpackHalf2x16(s ^ 0x3c003c00u), unpackHalf2x16(s2 ^ 0x3c003c00u));
+    f16vec4 a1 = a0 * f16vec4(1.0001);
+    f16vec4 b1 = b0 * f16vec4(0.9999);
+
+    // int8 operands packed 4 per word
+    int p0 = int(s);
+    int p1 = int(s2);
+    int p2 = int(s ^ 0x01010101u);
+    int p3 = int(s2 ^ 0x02020202u);
+
+    float f0 = 0.0, f1 = 0.0, f2 = 0.0, f3 = 0.0;
+    float f4 = 0.0, f5 = 0.0, f6 = 0.0, f7 = 0.0;
+    int i0 = 0, i1 = 0, i2 = 0, i3 = 0;
+    int i4 = 0, i5 = 0, i6 = 0, i7 = 0;
+
+    for (uint it = 0; it < p.iters; ++it) {
+#ifdef INT8
+        i0 = dotPacked4x8EXT(p0, p1) + i0;
+        i1 = dotPacked4x8EXT(p1, p2) + i1;
+        i2 = dotPacked4x8EXT(p2, p3) + i2;
+        i3 = dotPacked4x8EXT(p3, p0) + i3;
+        i4 = dotPacked4x8EXT(p0, p2) + i4;
+        i5 = dotPacked4x8EXT(p1, p3) + i5;
+        i6 = dotPacked4x8EXT(p2, p0) + i6;
+        i7 = dotPacked4x8EXT(p3, p1) + i7;
+#else
+        // each line lowers to two v_dot2_f32_f16 instructions
+        f0 = v_dot2_f32_f16(a0.zw, b0.zw, v_dot2_f32_f16(a0.xy, b0.xy, f0));
+        f1 = v_dot2_f32_f16(a1.zw, b0.zw, v_dot2_f32_f16(a1.xy, b0.xy, f1));
+        f2 = v_dot2_f32_f16(a0.zw, b1.zw, v_dot2_f32_f16(a0.xy, b1.xy, f2));
+        f3 = v_dot2_f32_f16(a1.zw, b1.zw, v_dot2_f32_f16(a1.xy, b1.xy, f3));
+        f4 = v_dot2_f32_f16(a0.zw, b0.zw, v_dot2_f32_f16(a1.xy, b1.xy, f4));
+        f5 = v_dot2_f32_f16(a1.zw, b1.zw, v_dot2_f32_f16(a0.xy, b0.xy, f5));
+        f6 = v_dot2_f32_f16(a0.zw, b1.zw, v_dot2_f32_f16(a1.xy, b0.xy, f6));
+        f7 = v_dot2_f32_f16(a1.zw, b0.zw, v_dot2_f32_f16(a0.xy, b1.xy, f7));
+#endif
+    }
+
+#ifdef INT8
+    data_d[t] = uint(i0 ^ i1 ^ i2 ^ i3 ^ i4 ^ i5 ^ i6 ^ i7 ^ p0 ^ p3);
+#else
+    float acc = f0 + f1 + f2 + f3 + f4 + f5 + f6 + f7;
+    data_d[t] = floatBitsToUint(acc);
+#endif
+}
