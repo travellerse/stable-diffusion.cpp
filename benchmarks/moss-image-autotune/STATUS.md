@@ -65,3 +65,24 @@ are the op-count asserts themselves); build OK; `test-int8-convrot --vulkan` pas
 microbench output FNV-1a identical to pre-rebase (`cec6e814…` / `142a8989…` / `7be47525…`) with
 14.6/25.9/13.9 ms; end-to-end 1024² = 51.1 s (pre-rebase 51.5 s).
 Rollback: `git -C ggml reset --hard 3c846059` (old tip, still reachable).
+
+## Preview TAE backend placeholder (2026-10-30)
+
+`--backend tae-preview=cpu` now moves only the step-preview TAE to the CPU; DiT/TE/VAE are
+untouched and an unset assignment still follows `vae` (default behaviour unchanged).
+
+- 1024², 8 steps, `--preview tae --preview-interval 1`: sampling 48.6 s → 96.0 s (≈5.9 s per
+  preview), peak VRAM unchanged vs no preview, min free 1.91–1.92 GB.
+- Preview TAE on the GPU at 1024² trips the 1.5 GiB safety gate with a ~3 GB desktop footprint
+  (free dropped to 1.32 GB); at 768² it costs +0.50 GB peak and 0.17 s per preview.
+- `--preview proj` is free (sampling 47.65 s) but renders a 128² colour projection.
+- Old `--backend vae=cpu` also moves the final decode: generate 142.4 s vs 103.0/100.3 s.
+
+## Preview TAE: im2col is the cost (2026-10-30, supersedes the CPU-offload advice)
+
+Keep the preview TAE on the GPU and add `--conv-direct vae=on` (the preview module inherits it):
+1024² preview costs 0.19–0.41 s per step (vs ~1 GB of im2col scratch and a safety abort on the
+default path), final VAE decode 3.35 → 1.59 s, peak unchanged. 2 MP: 0.5–0.6 s per preview,
+decode 5.59 → 2.89 s. `--backend tae-preview=cpu` is only for VRAM-constrained runs (5.9 s per
+preview at 1024², unaffected by `--conv-direct`). The Vulkan conv probe benchmarks only 32×32 and
+16×16 shapes, which is why `auto` misses this; changing the probe needs a separate evaluation.
