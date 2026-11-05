@@ -1094,3 +1094,300 @@ attention 再涨 ~50 %（step 从 10.7 s 到 ~12.5 s）。
 
 结论：Qwen-Image edit 的可优化项只剩 **attention**（40% 效率，且其代价被参考图翻倍）和
 **缓存**（spectrum 已给 −16.5 %）。量化 GEMM 已无空间。
+
+## 32. FA 调优首次成功：RDNA2 上 D=128 的 `block_cols` 32→64（接受）
+
+`get_fa_tuning_params_scalar` 对 D=128 取 `block_cols = (D & 8) ? 64 : 32 = 32`；
+对 AMD RDNA2 且 hsk=hsv=128 的注意力改为 64（KV tile 翻倍，Q 复用提升，shared 16.9→33.8 KB）。
+
+| 测量 | 基线 (Bc=32) | Bc=64 | 变化 |
+|---|---|---|---|
+| FA 单算子（L=4120, H=24, 交叉各 3 次） | 42.13 / 41.94 ms | **36.82 / 36.71 ms** | **−12.7 %** |
+| 与 CPU FA 参考误差 rms | 6.165e-06 | 6.164e-06 | 不变（ulp 级） |
+| MOSS 1024² 采样 | 43.20 s | **40.70 s** | −5.8 % |
+| MOSS 1024² wall | 49.72 s | **45.36 s** | −8.8 % |
+| Qwen edit 1024² 采样 | 86.94 s | **82.43 s** | −5.2 % |
+| Qwen edit wall | 102.99 s | **98.67 s** | −4.2 % |
+
+数值等价（Bc 只改变 online-softmax 的分块顺序，误差仍在 ulp 级），两个模型端到端一致变快。
+这是 attention 方向试了 6 个变体后第一个正收益，**保留**。判定条件为 RDNA2 + hsk=hsv=128，
+其它 128 头模型（Flux/SDXL 等）会同样生效，但只在 MOSS/Qwen 上验证过。
+
+## 33. 重新建立的基线（含已接受的优化，2026-10-30 收尾）
+
+工作树：`13fbbae`（bench 提交）+ `ggml` 未提交（int8 RPM=4 内核、`wg_denoms`、FA `block_cols=64`）
++ 用户未提交 `src/model_io/safetensors_io.cpp`（ComfyUI legacy 量化元数据，+37 行，未触碰）。
+recipe 哈希 `50eae7d2…` 未变；GPU 空闲（无 KFD 进程，占 1.73 GB）。
+
+| 配置 | TE | 采样 | VAE | wall | 峰值 / 最低空闲 |
+|---|---|---|---|---|---|
+| 1024² #1 | 4.0 | 42.19 | 1.58 | 48.80 | 8.99 / 3.00 GB |
+| 1024² #2 | 2.2 | 41.21 | 1.57 | 45.85 | 8.98 / 3.01 GB |
+| 1440×1920 | 2.2 | **151.64** | 8.38 | **163.48** | 8.57 / 3.42 GB |
+
+对照用户基线（1024² 采样 42.4 / wall 47.1；1440×1920 wall 177.7）：
+- 1024² 落在 41.2–42.2 / 45.9–48.8，与基线同级（会话漂移 ±5 %，真实收益见交叉 A/B：GEMM +3.3 %、FA −12.7 %）。
+- **1440×1920 wall 177.7 → 163.5 s（−8.0 %）**，采样 169.8–171.1 → 151.6 s，高分辨率收益更明显
+  （分辨率越高，attention 占比越大，`block_cols=64` 的收益越显著）。
+
+当前已接受的优化：
+1. int8 GEMM：64 行 × 32 列 tile、RPM=4 + `LDS.128`、双缓冲（逐位一致，+3.3 %）；
+2. FA：RDNA2 + D=128 时 `block_cols` 32→64（ulp 级差异，单算子 −12.7 %）；
+3. 配置：`--flash-attn diffusion=on --conv-direct vae=on`。
+
+## 34. 1440×1920 逐算子分解（回答高分辨率瓶颈问题）
+
+perf logger，8 步，`--flash-attn diffusion=on --conv-direct vae=on`，采样墙钟 154.32 s，
+单步 GPU 计时中位 **18.90 s**（8 步合计 151.2 s ≈ 采样 154.3 s，误差 2 %）。
+
+| 算子 | 每步 ms | 占比 | 调用数 |
+|---|---|---|---|
+| **FLASH_ATTN_EXT**（L=10842, 24 heads, D128） | **10169** | **53.8 %** | 44 |
+| MUL_MAT i8 ffn_up_gate (16384×10842×3072) | 2686 | 14.2 % | 42 |
+| MUL_MAT i8 qkv (9216×10842×3072) | 1552 | 8.2 % | 42 |
+| MUL_MAT i8 ffn_down (3072×10842×8192) | 1383 | 7.3 % | 42 |
+| RMS_NORM_MUL | 520 | 2.8 % | 177 |
+| MUL_MAT i8 proj.o | 516 | 2.7 % | 42 |
+| MUL / SCALE / ADD / ROPE | 1362 | 7.2 % | — |
+| 其余 | ~500 | 2.6 % | — |
+
+**与 1024² 的对比（每步）**
+
+| 项 | 1024² | 1440×1920 | 增长 |
+|---|---|---|---|
+| attention | 1.60 s（32 %） | **10.17 s（53.8 %）** | 6.4× |
+| i8 GEMM | 2.42 s（49 %） | 6.14 s（32.5 %） | 2.5× |
+| 逐元素等 | 0.9 s | 1.9 s | 2.1× |
+| 单步合计 | 4.92 s | 18.90 s | 3.8× |
+
+像素数只增长 2.64×，但单步时间增长 3.8× —— **超出部分几乎全部来自 attention 的 O(n²) 增长**
+（4096 → 10842 tokens，attention 工作量 7.0×）。
+
+### 34.1 四个问题的回答
+
+1. **1440×1920 采样里 attention 占多少**：10.17 s/步 × 8 = **81.4 s，占采样 154.3 s 的 53 %**。
+2. **Bc=64 省了多少端到端**：1024² 交叉 A/B 实测采样 −5.8 %；1440×1920 尚未做 A/B，
+   按 attention 占比 54 % × 单算子 −12.7 % 推算约 **−6.9 % 采样（≈10.6 s）**，待实测确认。
+3. **GEMM 是否接近上限**：是。10842 行下 upgate 单次 64 ms = 17.0 TFLOP/s，与 1024²/4096 行
+   完全一致（平台期）；此前已证明既非带宽受限（行数扫描平坦）也非 dp4a 发射受限（换加法不变）。
+4. **高分辨率下是否有比调 kernel 更好的机会**：attention 占 54 % 且已试遍 6 个参数方向，
+   逐元素只有 10 %。**Bc 维度已到顶**：`Bc=128` 需要的 shared 为
+   `Bc×(D/4+1)×16 = 128×33×16 = 67.6 KB > 设备上限 65 536 B`（另有 Qf/masksh），
+   静态即可判定不可行，无需编译验证。因此高分辨率的重心只能是 attention 的**结构性**改动
+   （换 tile 布局/换 kernel），而非继续调参。
+
+## 35. 当前 FA 执行结构（从 `flash_attn.comp` 还原，MOSS 1440×1920 实际配置）
+
+### 35.1 调度与线程映射
+
+- 每次 `FLASH_ATTN_EXT` 一个 dispatch：workgroups = `ceil(L_q/Br) × heads`；每 WG `BLOCK_SIZE = 4×subgroup = 128` 线程（wave32 × 4）。
+- 线程角色：`row_tid = tid / threads_per_rowgroup`（row_split=1 时恒 0）、
+  `col_tid = (tid % threads_per_rowgroup) / D_split`（0…15）、`d_tid = tid % D_split`（0…7）。
+  即 **每 8 个 lane 合作完成一条 score 的 D=128 点积**（每 lane 16 个 float = 4×`vec4`），
+  16 个 col 组覆盖一个 KV tile 的 64 列（每线程 2 列），每线程持 `rows_per_thread=8` 行累加器。
+- 归约：`for (s = D_split/2; …) Sf += subgroupShuffleXor(Sf, s)` —— 8 lane 蝶形归约。
+
+### 35.2 数据流与存储
+
+| 缓冲 | 位置 | 大小（D=128,Br=8,Bc=64） |
+|---|---|---|
+| Q | shared `Qf`（`HSK/4+1` 步长防冲突） | 8×33×16 = **4.2 KB** |
+| mask | shared `masksh` | 64×9×4 = 2.3 KB |
+| K/V | **不做 shared staging**（`SHMEM_STAGING` 仅 NVIDIA 开启）→ 每线程直接 `data_kv4[...]` 全局读 | 0 |
+| occupancy limiter | shared（强制占用率上限，hsk≤128 & rows≥64 时 30 KB） | **30 KB** |
+
+合计约 36.5 KB/WG（≈1 WG/SIMD 上限内的 2 WG/CU）。K/V 不走 LDS 是 RDNA2 路径的关键特征：
+每个 query tile（Br=8 行）都要重新流式读取整个 KV；L=10842 时每 head 的 KV 为 2.8 MB、
+24 heads 合计 66 MB，**可整体驻留 96 MB Infinity Cache**，因此实测并不慢，但这决定了
+「增大 Br」会减少 KV 复读（Br=16 曾使单算子 −7 %，却因端到端其它效应被否决）。
+
+### 35.3 单趟结构
+
+`for (j = start_j; j < end_j; ++j)` **只有一层 KV 循环**：每轮完成 QK^T → 行内 max/sum 更新 →
+PV 累加，standard online-softmax，无二次遍历、无中间 P 矩阵落盘。因此方向 A（Split-KV）在本实现里
+解决的是 **workgroup 数不足/尾部效应**，而不是重复 K/V 读——需先确认 workgroup 数是否真的不足。
+
+**workgroup 数核算（1440×1920）**：`ceil(10842/8)=1356` 个 query tile × 24 heads = **32 544 个 WG**，
+远超 40 CU × 2 WG = 80 的并行容量（409 倍超额）。**结论：并行度充足，Split-KV 在数学上不会有收益
+（只会增加 Q 重读与归约开销），方向 A 直接关闭。**
+
+### 35.4 四个结构方向的初判（源码级证据）
+
+| 方向 | 证据 | 判定 |
+|---|---|---|
+| **A. Split-KV** | WG 数 = ceil(10842/Br=8)×24 heads = **32 544 个**，是 40 CU × 2 WG 的 409 倍 | **关闭**：并行度早已饱和，切分 KV 只会重复读 Q 并增加归约开销 |
+| **C. FP16 dot2** | `dot_product_funcs.glsl` 在 `DOT2_F16` 下用 `spirv_instruction(id=6916)` = `v_dot2_f32_f16`；本卡报 `fp16: dot2`，pipeline 选择 `flash_attn_f32_f16_dot2` | **已充分利用，关闭** |
+| **D. K/V staging** | AMD 上 `SHMEM_STAGING=0`，K/V 直接全局读（L2/Infinity Cache）；Q 走 shared | **待评估**：KV 66 MB 可驻留 96 MB IC，理论上已命中；需实测 L2 命中或对比 staged 版本 |
+| **B. Wave32 重映射** | 现映射为 8 lane 协作一条 score（每 lane 4×vec4=16 floats），16 col 组 × 8 d 组 = 128 线程 | **候选**：唯一尚未证伪的结构性方向，但开发成本最高（等价重写 shader） |
+
+（Bc=64 的 1440×1920 交叉 A/B 正在后台运行，3 对交错，结果见下一节。）
+
+### 35.5 候选设计对比表（阶段四交付物）
+
+| 方向 | 预期收益 | 正确性风险 | LDS 占用 | VGPR 压力 | 额外显存 | 开发成本 | 当前状态 |
+|---|---|---|---|---|---|---|---|
+| **A. Split-KV** | 0（并行度已 409× 饱和） | 需稳定合并 softmax | 不变 | 不变 | partial O + m/l（约 heads×Br×D×split×4B） | 中高（新 kernel + reduce） | **关闭（证伪）** |
+| **B. Wave32 重映射** | 未知，上限约 1.2×（当前 5.1 TFLOP/s vs 12.6 峰值 40%） | 高（需完整覆盖 D=128、跨 wave 归约） | 可降低（Q 常驻寄存器） | 高（每 lane 需持更多 D 分量） | 0 | **最高**（等价重写 shader） | 候选，未实现 |
+| **C. FP16 dot2** | 0（已在用 `v_dot2_f32_f16`） | — | — | — | — | — | **关闭（证伪）** |
+| **D. K/V LDS staging** | 待测（若 IC 已命中则 ≤0） | 低（同一 shader 的既有路径） | **+16.9 KB**（fp16，Bc=64/D=128，总占用 21.2 KB） | 不变 | 0 | **低**（一行启发式 + 关闭占用限制器） | **原型已构建，待 GPU 空闲后测** |
+
+shared 预算（`ggml_vk_flash_attn_scalar_shmem_support`，fp16 即 float_type_size=2）：
+tmpsh 512 + tmpshv4 1024 + masksh 1152 + iq 32 + Qf 2112 + kvsh 16 896 ≈ **21.2 KB** < 64 KiB，
+不会被 `block_rows /= 2` 静默降级，实验可比。
+
+## 36. Bc=64 在 1440×1920 的交叉 A/B（3 对，确认固定基线）
+
+A/B/B/A + A/B 交错，其余参数（模型/seed/prompt/GEMM 内核/编译/后端）完全一致：
+
+| 配置 | 采样（s） | 中位 | wall 中位 | 峰值显存 |
+|---|---|---|---|---|
+| Bc=32 | 165.84 / 166.46 / 166.65 | **166.46** | 178.28 | 8.47–8.57 GB |
+| Bc=64 | 152.28 / 153.84 / 154.44 | **153.84** | 168.09 | 8.42–8.49 GB |
+
+**采样 −7.6%，wall −5.7%**，三次全部同向、无区间重叠（单次 bc64-r1 的 wall 189.5 s 是首跑冷启动异常，用中位数判定）。
+与 1024² 的 −5.8% 一致 → **Bc=64 确认为本轮固定基线**（1440×1920 采样 153.8 s）。
+
+## 37. 方向 D（K/V LDS staging）实测：慢 3 倍，关闭
+
+探针：`shmem_staging = 1`（RDNA2 + D=128），同时关掉为全局直读设计的 30 KB 占用限制器。
+shared 预算 21.2 KB（fp16），`ggml_vk_flash_attn_shmem_support` 通过，不会被静默降级。
+
+**正确性**（L=10842, H=1, 对拍 CPU 参考）：max_abs 3.95e-05、rms 5.87e-06 —— 正确。
+
+**性能**（L=10842, H=24, D=128，交叉两轮各 3 次）：
+
+| 版本 | 时间 | 相对 |
+|---|---|---|
+| 全局直读（现行） | 243.43 / 243.24 ms（5934 GFLOP/s） | 1.00× |
+| K/V LDS staging | 748.54 / 751.54 ms（1930 GFLOP/s） | **3.08× 慢** |
+
+结论：K/V 每 head 2.8 MB / 24 heads 共 66 MB，可整体驻留 96 MB Infinity Cache，全局直读已命中 IC；
+再经 LDS 多一次搬运 + 每 KV tile 一次 barrier，纯亏。**方向 D 关闭**（探针已完整回退）。
+
+**四方向终态**：A 关闭（并行度 409× 饱和）、C 关闭（dot2 已在用）、D 关闭（staging 3× 慢）、
+B（wave32 重映射）未实现，是唯一剩下的结构性方向。
+
+## 38. 本轮 FA 结构性探索的收敛结论
+
+四方向 × 全部子参数，证据如下：
+
+| 方向/参数 | 结果 | 证据 |
+|---|---|---|
+| A. Split-KV | 关闭 | WG 数 32 544（40 CU × 2 WG 的 409 倍），并行度饱和 |
+| C. FP16 dot2 | 关闭 | 已用 `v_dot2_f32_f16`（`spv id 6916`），`fp16: dot2` |
+| D. K/V LDS staging | 关闭 | 748 ms vs 243 ms（3.08× 慢），IC 直读更优 |
+| Bc 32→64 | **保留** | 1024² −5.8 %、1440×1920 −7.6 %（采样），数值 ulp 级 |
+| Br 8→16 / row_split 4 / d_split 4 / Bc128 | 全部拒绝 | 见 §32、§29、§3.1（Bc128 超 64 KiB） |
+
+**剩余限制（可量化）**：FA 单算子 5934 GFLOP/s ≈ packed fp16 峰值（25.2 TFLOP/s）的 23.5 %。
+结构上已排除的问题：并行度、指令选择、K/V staging。**唯一残余的低效点是 Q 的 LDS 复读**——
+`rows_per_thread=8` 时每线程若缓存 Q 需 8×4 vec4 = 128 VGPR，寄存器放不下，只能每次从 shared 读
+（约 1 次 LDS / 1 次 dot2）。要消除它必须改变 row/lane 映射（即方向 B），而所有可调的组合
+（Br、row_split、d_split）都在这个权衡上做过实验且都更差。
+
+**结论**：在当前 `flash_attn.comp` 的框架内，RX 6700 XT 上已无正收益的结构性改动；
+保留 Bc=64 作为固定基线。方向 B（从零写 wave32 专用 FA）是唯一可能的下一步，
+预计收益上限约 1.2–1.5×（需把每 lane 的 Q 常驻寄存器并把 rows/lane 映射重排），
+属于多小时的等价重写，风险与工作量都显著高于本轮之前的所有改动。
+
+## 39. FA 内层的支配成本：Q 的 LDS 指令（探针 + 两种缓存变体）
+
+**探针（ISA 对照，思路同 GEMM 的 dp4a→add）**：把内层 `dot_product(Qf[...], K_Tf, Sf)` 的 Q 共享读
+替换为寄存器常量（结果错误，但每条 dot2 少一条 LDS）：
+
+| 版本 | L=10842,H=24 | 相对 |
+|---|---|---|
+| 现行 | 243.41 / 243.47 ms（5934 GFLOP/s） | 1.00× |
+| 去掉 Q 的 LDS | **123.53 / 123.06 ms（11693 GFLOP/s）** | **1.98×** |
+| A/A 对照（同内核重编） | 243.29 / 243.46 | 噪声 <0.5 % |
+
+→ 内层是**纯发射受限**：每个 score 元素 = 1 条 LDS + 1 条 dot2，去掉 LDS 正好 2×。
+
+**两种合法的 Q 寄存器缓存（数学等价，已对拍 CPU 参考 rms 5.87e-06 不变）**：
+
+| 变体 | 额外 VGPR | 时间 | 相对 |
+|---|---|---|---|
+| 全行缓存（`HSK_per_thread/4 >= 4`，Q_cache[8]） | +16 | 377.6 / 377.6 ms | **0.64×（慢 55 %）** |
+| 半行缓存（每次 4 行，2 段） | +8 | 462.7 / 462.8 ms | **0.53×（慢 90 %）** |
+
+结论：**Q 的 LDS 指令确实是支配成本（上限 2×），但任何寄存器缓存都因 VGPR 压力损失占用率而净亏**。
+要真正拿下这 2×，必须换 lane 映射（方向 B）：让 rows_per_thread 降到 2–4、cols_per_thread 提到 4–8，
+使 Q 常驻寄存器而累加器不超标——这正是本轮认定的、唯一还没实现的结构性方案。
+
+### 39.1 第三个 lane 重排尝试：row_split=2 + Bc=32 + Q 缓存（错误，回退）
+
+按「rows_per_thread↓、cols_per_thread↑ 让 Q 常驻寄存器」的思路，用现有旋钮组合出
+`row_split=2`（每线程 4 行）+ `Bc=32`（每线程 4 列）+ Q 缓存（Q_cache[4] = 8 VGPR）：
+
+| 指标 | 结果 |
+|---|---|
+| 正确性（L=10842, H=1 vs CPU） | **max_rel 0.968、rms 2.14e-03 —— 错误** |
+| 速度（L=10842, H=24） | 495.6 / 494.5 ms（0.47×） |
+
+`row_split=2` 从未被上游验证过（启发式只会产生 1 或 4），该组合在 shader 的 row/col 划分上不自洽。
+已回退。
+
+### 39.2 本轮 FA 结构探索的最终结论
+
+| 尝试 | 结果 |
+|---|---|
+| 方向 A（Split-KV） | 证伪：WG 数 32 544，容量 409× |
+| 方向 C（dot2） | 证伪：已在用 `v_dot2_f32_f16` |
+| 方向 D（K/V LDS staging） | 证伪：3.08× 慢 |
+| Bc 32→64 | **接受：1024² −5.8 %、1440×1920 −7.6 %** |
+| Q-LDS 探针 | 2× 上限（证明内层发射受限） |
+| Q 缓存 ×3 变体（全行 / 半行 / row_split=2） | 全部更慢或数值错误 |
+
+**结论**：`flash_attn.comp` 这一 shader 家族在 RX 6700 XT 上已无正收益的结构性改动。
+剩余 2× 的理论空间（Q 的 LDS 指令）无法通过寄存器缓存或现有 row/col 旋钮触及——
+它需要**从零写一个 wave32 专用 FA**（自有 lane 映射与在线 softmax），属新工件而非改造。
+在拿到这样的实现之前，保留 Bc=64 为固定基线（1440×1920 采样 153.8 s / wall 168.1 s）。
+
+### 39.3 最终状态确认（收尾复跑）
+
+`1440×1920`、8 步、`--flash-attn diffusion=on --conv-direct vae=on`、当前工作树：
+
+| 指标 | 值 |
+|---|---|
+| 采样 | **154.77 s**（与 A/B 中位 153.84 一致） |
+| VAE 解码 | 8.40 s |
+| wall | **168.11 s**（原基线 177.70 s → **−5.4 %**） |
+| 显存峰值 / 最低空闲 | 8.52 GB / 3.46 GB |
+
+工作树：`ggml` 三处已接受改动（int8 内核、`wg_denoms`、FA Bc=64）；用户 `src/model_io/safetensors_io.cpp` 未触碰。
+
+## 40. 交接状态与下一会话的入口（FA 结构轮）
+
+**当前已接受状态**（勿覆盖）：
+- `ggml/src/ggml-vulkan/vulkan-shaders/mul_mat_i8_tensorwise.comp` — int8 64×32/RPM=4/`LDS.128`/双缓冲（逐位一致）。
+- `ggml/src/ggml-vulkan/ggml-vulkan.cpp` — int8 `wg_denoms {32,64}`；FA `block_cols=64`（RDNA2 + hsk=hsv=128）。
+- 用户未提交：`src/model_io/safetensors_io.cpp`（禁止触碰）。
+- 基线：1440×1920 采样 **153.8–154.8 s** / wall **168.1 s**；1024² 采样 40–42 s；峰值 8.5 GB。
+
+**复现与验证工具**（都在仓库里）：
+```shell
+# 重建
+cd build-vulkan && /usr/bin/ninja -j2 sd-cli
+# FA 正确性（对拍 CPU 参考；第 4 个参数 noref 只测速）
+g++ -O2 -std=c++17 -fopenmp -Iggml/include -Iggml/src benchmarks/moss-image-autotune/attn_check.cpp \
+  -Wl,--start-group build-vulkan/ggml/src/libggml-base.a build-vulkan/ggml/src/ggml-vulkan/libggml-vulkan.a \
+  build-vulkan/ggml/src/libggml-cpu.a build-vulkan/ggml/src/libggml.a -Wl,--end-group \
+  -lvulkan -lpthread -ldl -o /tmp/attn_check
+/tmp/attn_check 10842 1 1            # 正确性（rms 应 <= ~6e-6）
+/tmp/attn_check 10842 24 3 noref     # 真实形状测速（基线 ~243 ms）
+# 端到端
+bash benchmarks/moss-image-autotune/run_variant.sh LABEL 1440 1920 --flash-attn diffusion=on --conv-direct vae=on
+```
+
+**已证伪（附数字，勿重复）**：Split-KV（并行度 409× 饱和）；dot2（已在用）；K/V LDS staging（748 vs 243 ms）；
+Q 全行缓存（377 ms）、半行缓存（462 ms）、`row_split=2+Bc=32+Q缓存`（数值错误）；
+Br=16（e2e +4.1%）、row_split=4（+15%）、d_split=4（慢或错）、Bc=128（超 64 KiB）。
+
+**唯一剩余方向与寄存器预算**：内层受 Q-LDS 发射支配（探针：去掉 Q 读 243→123 ms，1.98×）。
+任何缓存方案都要在已有的 16 个 score 累加器（`Sf[8][2]`）之外再占 VGPR，实测 +8/+16 VGPR 分别
+带来 −47 %/−36 % 的端到端损失。可行的设计必须**同时**减少累加器与 Q 读：
+例如 `rows_per_thread=2`、`cols_per_thread=2`（Sf[2][2]=4 累加器）+ Q 常驻 2 行（4 VGPR），
+按 (d, 4 行) 分批处理 KV tile——这需要一个新的 shader，而不是改参数。
+
+**1024² 回归（最终状态，2 次）**：采样 41.27 / 41.29 s，VAE 1.58 s，wall 47.06 / 46.16 s，
+峰值 9.03 GB、最低空闲 2.95 GB —— 与 FA 改动前的 40–42.5 s 同级，**无回归**。

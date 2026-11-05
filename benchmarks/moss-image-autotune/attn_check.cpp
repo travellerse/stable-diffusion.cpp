@@ -55,6 +55,7 @@ int main(int argc, char** argv) {
     const int L     = argc > 1 ? atoi(argv[1]) : 512;
     const int H     = argc > 2 ? atoi(argv[2]) : 4;
     const int iters = argc > 3 ? atoi(argv[3]) : 3;
+    const bool noref = argc > 4 && !strcmp(argv[4], "noref");
     const int D     = 128;
 
     std::vector<float> q((size_t) D * L * H);
@@ -102,6 +103,18 @@ int main(int argc, char** argv) {
         return 1;
     }
     ggml_backend_synchronize(rg.backend);
+
+    if (noref) {
+        double t0 = now_ms();
+        for (int i = 0; i < iters; ++i) {
+            ggml_backend_graph_compute(rg.backend, rg.gf);
+        }
+        ggml_backend_synchronize(rg.backend);
+        const double ms = (now_ms() - t0) / iters;
+        printf("L=%d H=%d D=%d  vulkan time %.2f ms  (%.0f GFLOP/s)\n", L, H, D, ms,
+               4.0 * (double) L * L * D * H / ms / 1e6);
+        return 0;
+    }
 
     rc.host.resize((size_t) D * L * H);
     rg.host.resize(rc.host.size());
