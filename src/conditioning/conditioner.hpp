@@ -16,6 +16,7 @@
 #include "core/util.h"
 #include "model/diffusion/model.hpp"
 #include "model/te/clip.hpp"
+#include "model/te/clipproj_connector.hpp"
 #include "model/te/llada_image_te.hpp"
 #include "model/te/llm.hpp"
 #include "model/te/ming_image_te.hpp"
@@ -1982,6 +1983,9 @@ struct LLMEmbedder : public Conditioner {
     std::shared_ptr<LLM::LLMRunner> llm;
     std::shared_ptr<T5Runner> byt5;
     std::shared_ptr<PH3ImageTextConnectorRunner> ph3_connector;
+    std::shared_ptr<ClipProjConnectorRunner> clipproj;
+    // Layer of the small encoder the published ClipProj matrices were fitted on.
+    static constexpr int clipproj_tap = 24;
 
     bool supports_prompt_images() const override {
         return llm->supports_prompt_images();
@@ -2048,21 +2052,41 @@ struct LLMEmbedder : public Conditioner {
                                                weight_manager);
         if (sd_version_is_minimax_h3(version)) {
             const bool has_ph3_connector = tensor_storage_map.count(std::string(PH3ImageTextConnectorRunner::prefix) + ".proj.weight") != 0;
+            // A ClipProj matrix maps any Qwen3-VL encoder into the 5120-dim H3 space, so the
+            // encoder size checks below do not apply; the matrix carries its own input_dim check.
+            const bool has_clipproj = tensor_storage_map.count("embeddings_connectors.mean_in") > 0;
             if (has_ph3_connector) {
                 if (llm->config.num_layers != 36 || llm->config.hidden_size != 2560) {
                     throw std::runtime_error("The P-H3-Image text connector requires the Qwen3-VL-4B text encoder");
                 }
                 ph3_connector = std::make_shared<PH3ImageTextConnectorRunner>(backend, tensor_storage_map, weight_manager);
-            } else if (llm->config.hidden_size == 2560) {
-                throw std::runtime_error(
-                    sd_format("%s with Qwen3-VL-4B requires the P-H3-Image text connector; "
-                              "pass it with --embeddings-connectors or use the MiniMax-H3 Qwen3-VL-32B text encoder",
-                              sd_version_name(version)));
-            } else if (llm->config.hidden_size != 5120 || (llm->config.num_layers != 50 && llm->config.num_layers != 64)) {
-                throw std::runtime_error(
-                    sd_format("%s requires the MiniMax-H3 Qwen3-VL-32B text encoder or Qwen3-VL-4B with the P-H3-Image text connector",
-                              sd_version_name(version)));
+            } else if (!has_clipproj) {
+                if (llm->config.hidden_size == 2560) {
+                    throw std::runtime_error(
+                        sd_format("%s with Qwen3-VL-4B requires the P-H3-Image text connector; "
+                                  "pass it with --embeddings-connectors or use the MiniMax-H3 Qwen3-VL-32B text encoder",
+                                  sd_version_name(version)));
+                }
+                if (llm->config.hidden_size != 5120 || (llm->config.num_layers != 50 && llm->config.num_layers != 64)) {
+                    throw std::runtime_error(
+                        sd_format("%s requires the MiniMax-H3 Qwen3-VL-32B text encoder or Qwen3-VL-4B with the P-H3-Image text connector",
+                                  sd_version_name(version)));
+                }
             }
+        }
+        if (sd_version_is_minimax_h3(version) && tensor_storage_map.count("embeddings_connectors.mean_in") > 0) {
+            clipproj = std::make_shared<ClipProjConnectorRunner>(backend, tensor_storage_map, weight_manager);
+            if (clipproj->model.input_dim != llm->config.hidden_size) {
+                throw std::runtime_error("the ClipProj matrix expects " + std::to_string(clipproj->model.input_dim) +
+                                         " hidden dims but the text encoder produces " +
+                                         std::to_string(llm->config.hidden_size) +
+                                         "; pass the matrix matching the encoder size");
+            }
+            LOG_INFO("MiniMax-H3 text encoder projection: %d -> %d (tap %d of %d layers)",
+                     static_cast<int>(clipproj->model.input_dim),
+                     static_cast<int>(clipproj->model.output_dim),
+                     clipproj_tap,
+                     static_cast<int>(llm->config.num_layers));
         }
         int pad_id = 151643;
         if (arch == LLM::LLMArch::MISTRAL_SMALL_3_2 || arch == LLM::LLMArch::MINISTRAL_3_3B) {
@@ -2102,6 +2126,9 @@ struct LLMEmbedder : public Conditioner {
         if (ph3_connector) {
             ph3_connector->get_param_tensors(tensors);
         }
+        if (clipproj) {
+            clipproj->get_param_tensors(tensors);
+        }
         if (byt5) {
             byt5->get_param_tensors(tensors, "text_encoders.t5xxl.transformer");
         }
@@ -2116,6 +2143,9 @@ struct LLMEmbedder : public Conditioner {
         if (ph3_connector) {
             ph3_connector->set_max_graph_vram_bytes(max_vram_bytes);
         }
+        if (clipproj) {
+            clipproj->set_max_graph_vram_bytes(max_vram_bytes);
+        }
         if (byt5) {
             byt5->set_max_graph_vram_bytes(max_vram_bytes);
         }
@@ -2125,6 +2155,9 @@ struct LLMEmbedder : public Conditioner {
         llm->set_runtime_backends(backends);
         if (ph3_connector) {
             ph3_connector->set_runtime_backends(backends);
+        }
+        if (clipproj) {
+            clipproj->set_runtime_backends(backends);
         }
         if (byt5) {
             byt5->set_runtime_backends(backends);
@@ -2161,6 +2194,9 @@ struct LLMEmbedder : public Conditioner {
         if (ph3_connector) {
             ph3_connector->set_flash_attention_enabled(enabled);
         }
+        if (clipproj) {
+            clipproj->set_flash_attention_enabled(enabled);
+        }
         if (byt5) {
             byt5->set_flash_attention_enabled(enabled);
         }
@@ -2171,6 +2207,9 @@ struct LLMEmbedder : public Conditioner {
         if (ph3_connector) {
             ph3_connector->set_scale_overrides(linear_scale, attn_scale);
         }
+        if (clipproj) {
+            clipproj->set_scale_overrides(linear_scale, attn_scale);
+        }
         if (byt5) {
             byt5->set_scale_overrides(linear_scale, attn_scale);
         }
@@ -2179,6 +2218,9 @@ struct LLMEmbedder : public Conditioner {
     void set_weight_adapter(const std::shared_ptr<WeightAdapter>& adapter) override {
         if (ph3_connector) {
             ph3_connector->set_weight_adapter(adapter);
+        }
+        if (clipproj) {
+            clipproj->set_weight_adapter(adapter);
         }
         if (llm) {
             llm->set_weight_adapter(adapter);
@@ -2191,6 +2233,9 @@ struct LLMEmbedder : public Conditioner {
     void runner_end() override {
         if (ph3_connector) {
             ph3_connector->runner_end();
+        }
+        if (clipproj) {
+            clipproj->runner_end();
         }
         if (llm) {
             llm->runner_end();
@@ -2605,7 +2650,10 @@ struct LLMEmbedder : public Conditioner {
         if (sd_version_is_minimax_h3(version)) {
             prompt_template_encode_start_idx = 0;
             // The final tap is normalized; LLMRunner exposes it at num_layers + 1.
-            out_layers        = ph3_connector ? std::set<int>{13, 19, 25, 31, 37} : std::set<int>{50};
+            // With a ClipProj matrix the conditioning comes from an intermediate
+            // layer of the small encoder, before its final norm.
+            out_layers        = ph3_connector ? std::set<int>{13, 19, 25, 31, 37}
+                                              : std::set<int>{clipproj ? clipproj_tap : 50};
             prompt_attn_range = {0, 0};
 
             if (llm->enable_vision) {
@@ -3389,6 +3437,12 @@ struct LLMEmbedder : public Conditioner {
                                            &prompt_tokens);
         if (hidden_states.empty()) {
             return {};
+        }
+        if (clipproj) {
+            hidden_states = clipproj->compute(n_threads, hidden_states);
+            if (hidden_states.empty()) {
+                return {};
+            }
         }
         std::vector<sd::Tensor<float>> extra_hidden_states_vec;
         if (sd_version_is_hunyuan_video(version) && byt5) {
