@@ -726,15 +726,17 @@ namespace MiniMaxH3VAE {
         }
 
         static sd::TilingConfig resolve_original_tiling_params(sd::TilingConfig params) {
+            // Only 256 px tiles decode correctly; other sizes leave a block grid on the
+            // output (128 px is severe, 384 px mild, 512 px severe again), so pin the
+            // tile size instead of honouring the request.
+            constexpr int tile_pixels = 256;
             if (!params.enabled) {
                 params.target_overlap = 0.25f;
             }
-            if (params.tile_size_w == 0 && params.rel_size_w == 0.f) {
-                params.tile_size_w = 256;
-            }
-            if (params.tile_size_h == 0 && params.rel_size_h == 0.f) {
-                params.tile_size_h = 256;
-            }
+            params.tile_size_w     = tile_pixels;
+            params.tile_size_h     = tile_pixels;
+            params.rel_size_w      = 0.f;
+            params.rel_size_h      = 0.f;
             params.enabled         = true;
             params.temporal_tiling = false;
             return params;
