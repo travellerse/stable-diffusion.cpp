@@ -322,6 +322,7 @@ static void add_context_specs(std::vector<ParamSpec>& specs) {
     ctx.boolean("flash_attn", &sd::ContextConfig::flash_attn);
     ctx.boolean("force_sdxl_vae_conv_scale", &sd::ContextConfig::force_sdxl_vae_conv_scale);
     ctx.string("high_noise_diffusion_model_path", &sd::ContextConfig::high_noise_diffusion_model_path);
+    ctx.choice("idle_component_policy", &sd::ContextConfig::idle_component_policy, str_to_sd_idle_component_policy, SD_IDLE_COMPONENT_COUNT);
     ctx.string("ip_adapter_path", &sd::ContextConfig::ip_adapter_path);
     ctx.number("linear_scale", &sd::ContextConfig::linear_scale, 0, std::numeric_limits<float>::max());
     ctx.string("llm_path", &sd::ContextConfig::llm_path);

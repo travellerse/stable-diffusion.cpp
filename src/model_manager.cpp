@@ -1340,6 +1340,54 @@ void ModelManager::release_all() {
     release_params_storage_blocks(true);
 }
 
+bool ModelManager::release_component(ModelComponent component, bool release_params) {
+    if (component == ModelComponent::Count) {
+        return false;
+    }
+    std::unordered_set<TensorState*> target;
+    for (auto& state : tensor_states_) {
+        if (state != nullptr && state->component == component) {
+            target.insert(state.get());
+        }
+    }
+    if (target.empty()) {
+        return true;
+    }
+    for (TensorState* state : target) {
+        if (state->pin_count != 0 || state->staged_to_compute_backend) {
+            LOG_VERBOSE("skip releasing %s: tensor '%s' is still active",
+                        model_component_name(component), state->name.c_str());
+            return false;
+        }
+    }
+
+    clear_all_prefetched_params();
+    release_compute_staging_blocks(false, &target);
+    if (release_params) {
+        for (auto it = params_storage_blocks_.begin(); it != params_storage_blocks_.end();) {
+            ParamsStorageBlock* block = it->get();
+            bool owned                = !block->states.empty();
+            for (TensorState* state : block->states) {
+                if (state == nullptr || target.count(state) == 0) {
+                    owned = false;
+                    break;
+                }
+            }
+            if (owned) {
+                free_params_storage_block(*block);
+                it = params_storage_blocks_.erase(it);
+            } else {
+                ++it;
+            }
+        }
+        runtime_residencies_.clear();
+        runtime_owners_.clear();
+    }
+    LOG_INFO("released idle %s (%zu tensors, %s)", model_component_name(component), target.size(),
+             release_params ? "params+compute" : "compute");
+    return true;
+}
+
 ggml_tensor* ModelManager::resolve_param_tensor(ggml_tensor* tensor) const {
     for (auto* current = tensor; current != nullptr; current = current->view_src) {
         if (tensor_states_by_tensor_.count(current) != 0)

@@ -401,6 +401,7 @@ with at least two entries. SLG layer indices are nonnegative integers.
 | `hires.target_width` | `int` | image, video |
 | `hires.upscale_tile_size` | `int` | image, video |
 | `hires.upscaler` | `string` | image, video |
+| `idle_component_policy` | `string` | context |
 | `image` | `tensor` | upscale, adetail |
 | `image_preprocess.rules` | `string` | image, video |
 | `init_image` | `tensor` | image, video |

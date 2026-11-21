@@ -547,6 +547,11 @@ ArgOptions SDContextParams::get_options() {
          (int)',',
          &params_backend},
         {"",
+         "--idle-component-policy",
+         "release idle pipeline components between phases: off (default), memory (drop compute buffers, keep params), or release (drop compute buffers and params; reload on next use)",
+         0,
+         &idle_component_policy},
+        {"",
          "--split-mode",
          "weight distribution for modules assigned multiple devices (--backend \"diffusion=cuda0&cuda1\"): "
          "layer (whole transformer blocks per device, default) or row (matmul rows split across devices, CUDA only). "
@@ -955,6 +960,7 @@ std::string SDContextParams::to_string() const {
         << "  disable_segmented_compute: " << disable_segmented_compute << ",\n"
         << "  batched_cfg: " << batched_cfg << ",\n"
         << "  eager_load: " << eager_load << ",\n"
+        << "  idle_component_policy: \"" << idle_component_policy << "\",\n"
         << "  backend: \"" << backend << "\",\n"
         << "  params_backend: \"" << params_backend << "\",\n"
         << "  split_mode: \"" << split_mode << "\",\n"
@@ -1037,6 +1043,7 @@ SDOptPtr SDContextParams::to_context_opt() {
     opt.set_bool("disable_segmented_compute", disable_segmented_compute);
     opt.set_bool("batched_cfg", batched_cfg);
     opt.set_bool("eager_load", eager_load);
+    opt.set_string("idle_component_policy", idle_component_policy);
     if (backend || !effective_backend.empty())
         opt.set_string("backend", effective_backend);
     if (params_backend || !effective_params_backend.empty())

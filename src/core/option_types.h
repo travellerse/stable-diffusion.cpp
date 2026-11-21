@@ -152,6 +152,17 @@ const char* sd_control_type_name(enum sd_control_type_t control_type);
 
 enum sd_control_type_t str_to_sd_control_type(const char* str);
 
+enum sd_idle_component_policy_t {
+    SD_IDLE_COMPONENT_OFF = 0,  // keep idle components resident
+    SD_IDLE_COMPONENT_MEMORY,   // release idle compute buffers, keep params in their params backend
+    SD_IDLE_COMPONENT_RELEASE,  // release idle compute buffers and params; reload on next use
+    SD_IDLE_COMPONENT_COUNT,
+};
+
+const char* sd_idle_component_policy_name(enum sd_idle_component_policy_t policy);
+
+enum sd_idle_component_policy_t str_to_sd_idle_component_policy(const char* str);
+
 enum preview_t {
     PREVIEW_NONE,
     PREVIEW_PROJ,

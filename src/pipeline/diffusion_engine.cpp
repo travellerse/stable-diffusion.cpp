@@ -170,6 +170,16 @@ void StableDiffusionGGML::end_runners() {
             lora.model->runner_end();
 }
 
+void StableDiffusionGGML::release_idle_component(ModelComponent component) {
+    if (idle_component_policy == SD_IDLE_COMPONENT_OFF || model_manager == nullptr) {
+        return;
+    }
+    const bool release_params = idle_component_policy == SD_IDLE_COMPONENT_RELEASE;
+    if (!model_manager->release_component(component, release_params)) {
+        LOG_WARN("idle component release skipped: %s", model_component_name(component));
+    }
+}
+
 bool StableDiffusionGGML::reset_runners(const RunnerGroups& groups) {
     conditioning_cache_->clear();
     conditioning_loras_.clear();
@@ -938,6 +948,7 @@ bool StableDiffusionGGML::init(const sd::ContextConfig* sd_ctx_params) {
     disable_prefetch          = sd_ctx_params->disable_prefetch;
     disable_segmented_compute = sd_ctx_params->disable_segmented_compute;
     eager_load                = sd_ctx_params->eager_load;
+    idle_component_policy     = sd_ctx_params->idle_component_policy;
     backend_spec              = SAFE_STR(sd_ctx_params->backend);
     params_backend_spec       = SAFE_STR(sd_ctx_params->params_backend);
     split_mode_spec           = SAFE_STR(sd_ctx_params->split_mode);

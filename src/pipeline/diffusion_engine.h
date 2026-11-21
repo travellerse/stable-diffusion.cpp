@@ -110,6 +110,7 @@ public:
     bool disable_prefetch          = false;
     bool disable_segmented_compute = false;
     bool eager_load                = false;
+    sd_idle_component_policy_t idle_component_policy = SD_IDLE_COMPONENT_OFF;
     std::string backend_spec;
     std::string params_backend_spec;
     std::string split_mode_spec;
@@ -224,6 +225,8 @@ public:
     void capture_runner_sources();
 
     void end_runners();
+
+    void release_idle_component(ModelComponent component);
 
     bool reset_runners(const RunnerGroups& groups);
 

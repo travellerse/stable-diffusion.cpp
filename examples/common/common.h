@@ -165,6 +165,7 @@ struct SDContextParams {
     std::optional<bool> disable_prefetch;
     std::optional<bool> disable_segmented_compute;
     std::optional<bool> eager_load;
+    std::optional<std::string> idle_component_policy;
     std::optional<bool> batched_cfg;
     std::optional<std::string> backend;
     std::optional<std::string> params_backend;

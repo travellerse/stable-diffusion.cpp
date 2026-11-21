@@ -1909,6 +1909,10 @@ namespace sd::pipeline {
             return false;
         }
         ImageGenerationLatents latents = std::move(*latent_inputs_opt);
+        if (sd_version_is_minimax_h3(sd->version)) {
+            sd->release_idle_component(ModelComponent::VAE);
+            sd->release_idle_component(ModelComponent::AudioVAE);
+        }
 
         auto embeds_opt = prepare_video_generation_embeds(sd,
                                                           sd_vid_gen_params,
@@ -1919,6 +1923,9 @@ namespace sd::pipeline {
             return false;
         }
         ImageGenerationEmbeds embeds = std::move(*embeds_opt);
+        if (sd_version_is_minimax_h3(sd->version)) {
+            sd->release_idle_component(ModelComponent::Conditioner);
+        }
         if (latent_upscale_enabled) {
             LOG_INFO("generate_video %dx%dx%d -> video latent spatial upscale",
                      request.width,
@@ -2222,6 +2229,9 @@ namespace sd::pipeline {
                 LOG_DEBUG("s2v output audio copy failed (out of memory)");
             }
         }
+        if (sd_version_is_minimax_h3(sd->version)) {
+            sd->release_idle_component(ModelComponent::Diffusion);
+        }
         if ((sd_version_is_ltxav(sd->version) || sd_version_is_minimax_h3(sd->version)) &&
             latents.audio_length > 0 &&
             sd->audio_vae_model != nullptr) {
@@ -2254,6 +2264,9 @@ namespace sd::pipeline {
             int64_t audio_latent_decode_end = ggml_time_ms();
             LOG_INFO("decoding audio latent completed, taking %.2fs", (audio_latent_decode_end - audio_latent_decode_start) * 1.0f / 1000);
         }
+        if (sd_version_is_minimax_h3(sd->version)) {
+            sd->release_idle_component(ModelComponent::AudioVAE);
+        }
 
         if (latents.video_conditioning_frame_count > 0) {
             int64_t target_frames = latents.video_target_frame_count > 0 ? latents.video_target_frame_count
@@ -2275,6 +2288,9 @@ namespace sd::pipeline {
         if (result == nullptr) {
             sd::free_audio(generated_audio);
             return false;
+        }
+        if (sd_version_is_minimax_h3(sd->version)) {
+            sd->release_idle_component(ModelComponent::VAE);
         }
 
         sd->lora_stat();

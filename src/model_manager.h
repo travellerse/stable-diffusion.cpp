@@ -201,6 +201,7 @@ public:
     void set_writable_mmap(bool writable_mmap) { writable_mmap_ = writable_mmap; }
     void set_common_ignore_tensors(std::set<std::string> ignore_tensors);
     bool prepare_lora_sources(std::vector<LoraSpec>& loras);
+    bool release_component(ModelComponent component, bool release_params);
     bool set_loras(std::vector<LoraSpec> loras, SDVersion version);
     void set_split_buffer_type(ggml_backend_t compute_backend, ggml_backend_buffer_type_t split_buft, const std::vector<std::pair<ggml_backend_t, size_t>>& device_limits);
 

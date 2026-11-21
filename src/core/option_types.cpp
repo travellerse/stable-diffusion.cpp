@@ -235,6 +235,31 @@ const char* sd_control_type_name(enum sd_control_type_t control_type) {
     return "NONE";
 }
 
+static constexpr const char* idle_component_policy_to_str[] = {
+    "off",
+    "memory",
+    "release",
+};
+
+static_assert(SD_IDLE_COMPONENT_COUNT == sizeof(idle_component_policy_to_str) / sizeof(idle_component_policy_to_str[0]),
+              "\nnumber of elements in idle_component_policy_to_str[] != SD_IDLE_COMPONENT_COUNT");
+
+const char* sd_idle_component_policy_name(enum sd_idle_component_policy_t policy) {
+    if (policy >= SD_IDLE_COMPONENT_OFF && policy < SD_IDLE_COMPONENT_COUNT) {
+        return idle_component_policy_to_str[policy];
+    }
+    return "off";
+}
+
+enum sd_idle_component_policy_t str_to_sd_idle_component_policy(const char* str) {
+    for (int i = 0; i < SD_IDLE_COMPONENT_COUNT; i++) {
+        if (!strcmp(str, idle_component_policy_to_str[i])) {
+            return (enum sd_idle_component_policy_t)i;
+        }
+    }
+    return SD_IDLE_COMPONENT_COUNT;
+}
+
 enum sd_control_type_t str_to_sd_control_type(const char* str) {
     for (int i = 0; i < SD_CONTROL_TYPE_COUNT; i++) {
         if (!strcmp(str, control_type_to_str[i])) {
